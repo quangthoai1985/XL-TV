@@ -4,7 +4,7 @@
  * Endpoints:
  *   GET /             → Danh sách trận đấu (scrape từ trang chủ)
  *   GET /detail?url=X → Chi tiết trận: BLV, link stream (scrape trang chi tiết)
- *   GET /stream?url=X → Proxy fetch iframe stream → trả về m3u8 URL
+ *   GET /stream?url=X → Proxy fetch iframe stream → trả về URL stream thật
  */
 
 const DEFAULT_CONFIG_URL = "https://raw.githubusercontent.com/quangthoai1985/XL-TV/main/config.json";
@@ -73,22 +73,18 @@ async function handleDetail(detailPageUrl, sourceUrl) {
   }
   const html = await pageRes.text();
 
-  // 1. Lấy tiêu đề
   const titleMatch = html.match(/<h1>([\s\S]*?)<\/h1>/);
   const title = titleMatch ? titleMatch[1].replace(/\s+/g, " ").trim() : "";
 
-  // 2. Lấy giải đấu
   const leagueMatch = html.match(/<div class="title_box">[\s\S]*?<span>(.*?)<\/span>/);
   const league = leagueMatch ? leagueMatch[1].trim() : "";
 
-  // 3. Lấy list_stream (mảng 2 chiều các URL ajax)
   let listStream = [];
-  const streamMatch = html.match(/var list_stream = (\[[\s\S]*?\]);/);
+  const streamMatch = html.match(/var list_stream = ([\s\S]*?);/);
   if (streamMatch) {
     try { listStream = JSON.parse(streamMatch[1]); } catch (e) {}
   }
 
-  // 4. Lấy tên BLV (player-link)
   const blvList = [];
   const blvRe = /<a[^>]*class="[^"]*player-link[^"]*"[^>]*data-link="(\d+)"[^>]*>([\s\S]*?)<\/a>/g;
   let blvMatch;
@@ -111,7 +107,7 @@ async function handleDetail(detailPageUrl, sourceUrl) {
   }, { headers: corsHeaders() });
 }
 
-// ====== ENDPOINT 3: Lấy m3u8 thật từ ajax stream URL ======
+// ====== ENDPOINT 3: Lấy stream thật từ ajax URL ======
 async function handleStream(ajaxUrl, sourceUrl) {
   const res = await fetch(ajaxUrl, {
     headers: {
@@ -128,35 +124,68 @@ async function handleStream(ajaxUrl, sourceUrl) {
 
   const html = await res.text();
 
-  let m3u8Url = null;
+  // ===== \u01afu ti\u00ean 1: L\u1ea5y urlStream (link stream th\u1eadt, th\u01b0\u1eddng l\u00e0 .flv ho\u1eb7c .m3u8) =====
+  let streamUrl = null;
+  let streamType = null;
 
-  // Pattern 1: Tìm trực tiếp URL .m3u8
-  const m3u8Match = html.match(/https?:\/\/[^\s"'<>\\]+\.m3u8[^\s"'<>\\]*/);
-  if (m3u8Match) {
-    m3u8Url = m3u8Match[0];
-  }
-
-  // Pattern 2: Tìm trong các biến JS
-  if (!m3u8Url) {
-    const srcMatch = html.match(/(?:src|source|file|url|stream)\s*[:=]\s*["'](https?:\/\/[^"']+)/i);
-    if (srcMatch) {
-      m3u8Url = srcMatch[1];
+  const urlStreamMatch = html.match(/var\s+urlStream\s*=\s*["']([^"']+)["']/);
+  if (urlStreamMatch) {
+    streamUrl = urlStreamMatch[1];
+    const isFlvMatch = html.match(/var\s+isFlv\s*=\s*(true|false)/);
+    if (isFlvMatch && isFlvMatch[1] === "true") {
+      streamType = "flv";
+    } else if (streamUrl.includes(".m3u8")) {
+      streamType = "hls";
+    } else if (streamUrl.includes(".flv")) {
+      streamType = "flv";
+    } else {
+      streamType = "unknown";
     }
   }
 
-  // Pattern 3: Tìm trong iframe src
-  if (!m3u8Url) {
-    const iframeMatch = html.match(/<iframe[^>]*src=["']([^"']+)["']/);
-    if (iframeMatch) {
-      m3u8Url = iframeMatch[1];
+  // ===== \u01afu ti\u00ean 2: N\u1ebfu kh\u00f4ng c\u00f3 urlStream, t\u00ecm m3u8 KH\u00d4NG N\u1eb0M trong adsTvc =====
+  if (!streamUrl) {
+    const adUrls = new Set();
+    const adsTvcMatch = html.match(/var\s+adsTvc\s*=\s*(\[[\s\S]*?\]);/);
+    if (adsTvcMatch) {
+      try {
+        const ads = JSON.parse(adsTvcMatch[1]);
+        ads.forEach(ad => {
+          if (ad.file) adUrls.add(ad.file);
+        });
+      } catch (e) {}
+    }
+
+    const allM3u8 = [];
+    const m3u8Re = /https?:\/\/[^\s"'<>\\]+\.m3u8[^\s"'<>\\]*/g;
+    let m;
+    while ((m = m3u8Re.exec(html)) !== null) {
+      allM3u8.push(m[0]);
+    }
+
+    const realM3u8 = allM3u8.filter(url => !adUrls.has(url));
+    if (realM3u8.length > 0) {
+      streamUrl = realM3u8[0];
+      streamType = "hls";
+    } else if (allM3u8.length > 0) {
+      streamUrl = allM3u8[allM3u8.length - 1];
+      streamType = "hls";
+    }
+  }
+
+  // ===== \u01afu ti\u00ean 3: T\u00ecm trong src= attributes =====
+  if (!streamUrl) {
+    const srcMatch = html.match(/(?:source|file)\s*[:=]\s*["'](https?:\/\/[^"']+)["']/i);
+    if (srcMatch) {
+      streamUrl = srcMatch[1];
+      streamType = srcMatch[1].includes(".m3u8") ? "hls" : "unknown";
     }
   }
 
   return Response.json({
     ajax_url: ajaxUrl,
-    m3u8_url: m3u8Url,
-    raw_html_length: html.length,
-    raw_html_preview: html.substring(0, 500)
+    stream_url: streamUrl,
+    stream_type: streamType,
   }, { headers: corsHeaders() });
 }
 
@@ -188,7 +217,6 @@ export default {
       }
 
       return await handleHome(sourceUrl);
-
     } catch (err) {
       return Response.json({ error: err.message }, { status: 500, headers: corsHeaders() });
     }
