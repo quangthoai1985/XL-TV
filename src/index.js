@@ -43,7 +43,7 @@ async function handleHome(sourceUrl) {
   const addedUrls = new Set();
   let id = 1;
 
-  function addMatch(detailUrl, timeText, home, away, isLive) {
+  function addMatch(detailUrl, timeText, home, away, isLive, homeLogo, awayLogo, homeScore, awayScore) {
     if (!detailUrl) return;
     if (detailUrl.startsWith("/")) {
       detailUrl = sourceUrl.replace(/\/$/, "") + detailUrl;
@@ -56,6 +56,10 @@ async function handleHome(sourceUrl) {
       time: timeText,
       home_team: home,
       away_team: away,
+      home_logo: homeLogo,
+      away_logo: awayLogo,
+      home_score: homeScore,
+      away_score: awayScore,
       is_live: isLive,
       detail_url: detailUrl,
       stream_url: ""
@@ -76,6 +80,19 @@ async function handleHome(sourceUrl) {
     const timeMatch = block.match(/<div class="grid-match__date[^>]*>\s*<span>([^<]+)<\/span>/);
     const teamMatches = [...block.matchAll(/<p>([^<]+)<\/p>/g)];
     
+    const logoMatches = [...block.matchAll(/<img[^>]*src=["']([^"']+)["'][^>]*class=["'][^"']*team-logo-0[^"']*["'][^>]*>/g)];
+    const homeLogo = logoMatches.length > 0 ? logoMatches[0][1] : "";
+    const awayLogo = logoMatches.length > 1 ? logoMatches[1][1] : "";
+
+    let homeScore = "";
+    let awayScore = "";
+    const homeScoreMatch = block.match(/<div[^>]*class=["'][^"']*gmd_home-score[^"']*["'][^>]*>[\s\S]*?<p>([^<]+)<\/p>/);
+    const awayScoreMatch = block.match(/<div[^>]*class=["'][^"']*gmd_away-score[^"']*["'][^>]*>[\s\S]*?<p>([^<]+)<\/p>/);
+    if (homeScoreMatch && awayScoreMatch) {
+      homeScore = homeScoreMatch[1].trim();
+      awayScore = awayScoreMatch[1].trim();
+    }
+
     if (url && teamMatches.length >= 2) {
       let time = timeMatch ? timeMatch[1].trim() : "";
       
@@ -90,7 +107,7 @@ async function handleHome(sourceUrl) {
       }
 
       const isLive = /tr\u1ef1c ti\u1ebfp|hi\u1ec7p|live|\u0111ang|ph\u00fat/i.test(time) || block.includes('grid-match__status--live') || block.includes('live-gif');
-      addMatch(url, time, teamMatches[0][1].trim(), teamMatches[1][1].trim(), isLive);
+      addMatch(url, time, teamMatches[0][1].trim(), teamMatches[1][1].trim(), isLive, homeLogo, awayLogo, homeScore, awayScore);
     }
   }
 
