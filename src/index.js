@@ -62,22 +62,7 @@ async function handleHome(sourceUrl) {
     });
   }
 
-  // 1. Phân tích match-horizontals-item (carousel)
-  const blocks = html.split('class="match-horizontals-item"');
-  for (let i = 1; i < blocks.length; i++) {
-    const block = blocks[i];
-    const urlMatch = block.match(/href="([^"]+)"/);
-    const timeMatch = block.match(/<div class="h-time">([^<]+)<\/div>/);
-    const teamMatches = [...block.matchAll(/<div class="h-team-name">([^<]+)<\/div>/g)];
-    
-    if (urlMatch && timeMatch && teamMatches.length >= 2) {
-      const time = timeMatch[1].trim();
-      const isLive = /tr\u1ef1c ti\u1ebfp|hi\u1ec7p|live|\u0111ang/i.test(time);
-      addMatch(urlMatch[1], time, teamMatches[0][1].trim(), teamMatches[1][1].trim(), isLive);
-    }
-  }
-
-  // 2. Phân tích grid-match (danh sách chính)
+  // Phân tích grid-match (danh sách chính trong grid-matches)
   const gridBlocks = html.split('class="grid-match"');
   for (let i = 1; i < gridBlocks.length; i++) {
     const block = gridBlocks[i];
