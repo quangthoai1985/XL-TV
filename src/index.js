@@ -39,28 +39,76 @@ async function handleHome(sourceUrl) {
   const html = await pageRes.text();
 
   const matches = [];
-  const re = /<a[^>]*href="([^"]*)"[^>]*>[\s\S]*?<div class="h-time">([^<]+)<\/div>[\s\S]*?<div class="h-team-name">([^<]+)<\/div>[\s\S]*?<div class="h-team-name">([^<]+)<\/div>/g;
-  let m;
+  const addedUrls = new Set();
   let id = 1;
-  while ((m = re.exec(html)) !== null) {
-    const timeText = m[2].trim();
-    const isLive = /tr\u1ef1c ti\u1ebfp|hi\u1ec7p|live|\u0111ang/i.test(timeText);
-    let detailUrl = m[1].trim();
+
+  function addMatch(detailUrl, timeText, home, away, isLive) {
+    if (!detailUrl) return;
     if (detailUrl.startsWith("/")) {
       detailUrl = sourceUrl.replace(/\/$/, "") + detailUrl;
     }
+    if (addedUrls.has(detailUrl)) return;
+    addedUrls.add(detailUrl);
+    
     matches.push({
       id: (id++).toString(),
       time: timeText,
-      home_team: m[3].trim(),
-      away_team: m[4].trim(),
+      home_team: home,
+      away_team: away,
       is_live: isLive,
       detail_url: detailUrl,
       stream_url: ""
     });
   }
 
-  return Response.json({ source: sourceUrl, matches }, { headers: corsHeaders() });
+  // 1. Phân tích match-horizontals-item (carousel)
+  const blocks = html.split('class="match-horizontals-item"');
+  for (let i = 1; i < blocks.length; i++) {
+    const block = blocks[i];
+    const urlMatch = block.match(/href="([^"]+)"/);
+    const timeMatch = block.match(/<div class="h-time">([^<]+)<\/div>/);
+    const teamMatches = [...block.matchAll(/<div class="h-team-name">([^<]+)<\/div>/g)];
+    
+    if (urlMatch && timeMatch && teamMatches.length >= 2) {
+      const time = timeMatch[1].trim();
+      const isLive = /tr\u1ef1c ti\u1ebfp|hi\u1ec7p|live|\u0111ang/i.test(time);
+      addMatch(urlMatch[1], time, teamMatches[0][1].trim(), teamMatches[1][1].trim(), isLive);
+    }
+  }
+
+  // 2. Phân tích grid-match (danh sách chính)
+  const gridBlocks = html.split('class="grid-match"');
+  for (let i = 1; i < gridBlocks.length; i++) {
+    const block = gridBlocks[i];
+    
+    let url = null;
+    const urlMatches = [...gridBlocks[i-1].matchAll(/href="([^"]+)"/g)];
+    if (urlMatches.length > 0) {
+      url = urlMatches[urlMatches.length - 1][1];
+    }
+
+    const timeMatch = block.match(/<div class="grid-match__date[^>]*>\s*<span>([^<]+)<\/span>/);
+    const teamMatches = [...block.matchAll(/<p>([^<]+)<\/p>/g)];
+    
+    if (url && teamMatches.length >= 2) {
+      let time = timeMatch ? timeMatch[1].trim() : "";
+      
+      const elapsedMatch = block.match(/<p[^>]*id="elapsedTime"[^>]*>([^<]+)<\/p>/);
+      if (elapsedMatch && elapsedMatch[1].trim() !== "") {
+        time = elapsedMatch[1].trim();
+      } else {
+        const dataTimeMatch = block.match(/data-time="([^"]+)"/);
+        if (dataTimeMatch && dataTimeMatch[1].trim() !== "") {
+          time = dataTimeMatch[1].trim();
+        }
+      }
+
+      const isLive = /tr\u1ef1c ti\u1ebfp|hi\u1ec7p|live|\u0111ang|ph\u00fat/i.test(time) || block.includes('grid-match__status--live') || block.includes('live-gif');
+      addMatch(url, time, teamMatches[0][1].trim(), teamMatches[1][1].trim(), isLive);
+    }
+  }
+
+  return Response.json({ source: sourceUrl, total: matches.length, matches }, { headers: corsHeaders() });
 }
 
 // ====== ENDPOINT 2: Chi tiết trận (BLV + link stream) ======
