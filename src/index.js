@@ -1,67 +1,196 @@
 /**
- * Xoilac TV Scraper - Cloudflare Worker
+ * XL-TV Scraper — Cloudflare Worker
+ * 
+ * Endpoints:
+ *   GET /             → Danh sách trận đấu (scrape từ trang chủ)
+ *   GET /detail?url=X → Chi tiết trận: BLV, link stream (scrape trang chi tiết)
+ *   GET /stream?url=X → Proxy fetch iframe stream → trả về m3u8 URL
  */
 
 const DEFAULT_CONFIG_URL = "https://raw.githubusercontent.com/quangthoai1985/XL-TV/main/config.json";
 const FALLBACK_DOMAIN = "https://inyoureyesmovie.com";
 
+async function getSourceUrl() {
+  try {
+    const res = await fetch(DEFAULT_CONFIG_URL);
+    if (res.ok) {
+      const config = await res.json();
+      if (config.source_url) return config.source_url;
+    }
+  } catch (e) {}
+  return FALLBACK_DOMAIN;
+}
+
+function corsHeaders() {
+  return {
+    "Access-Control-Allow-Origin": "*",
+    "Content-Type": "application/json; charset=utf-8"
+  };
+}
+
+const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+
+// ====== ENDPOINT 1: Danh sách trận ======
+async function handleHome(sourceUrl) {
+  const pageRes = await fetch(sourceUrl, { headers: { "User-Agent": UA } });
+  if (!pageRes.ok) {
+    return Response.json({ error: "Không kết nối được web nguồn" }, { status: 500, headers: corsHeaders() });
+  }
+  const html = await pageRes.text();
+
+  const matches = [];
+  const re = /<a[^>]*href="([^"]*)"[^>]*>[\s\S]*?<div class="h-time">([^<]+)<\/div>[\s\S]*?<div class="h-team-name">([^<]+)<\/div>[\s\S]*?<div class="h-team-name">([^<]+)<\/div>/g;
+  let m;
+  let id = 1;
+  while ((m = re.exec(html)) !== null) {
+    const timeText = m[2].trim();
+    const isLive = /tr\u1ef1c ti\u1ebfp|hi\u1ec7p|live|\u0111ang/i.test(timeText);
+    let detailUrl = m[1].trim();
+    if (detailUrl.startsWith("/")) {
+      detailUrl = sourceUrl.replace(/\/$/, "") + detailUrl;
+    }
+    matches.push({
+      id: (id++).toString(),
+      time: timeText,
+      home_team: m[3].trim(),
+      away_team: m[4].trim(),
+      is_live: isLive,
+      detail_url: detailUrl,
+      stream_url: ""
+    });
+  }
+
+  return Response.json({ source: sourceUrl, matches }, { headers: corsHeaders() });
+}
+
+// ====== ENDPOINT 2: Chi tiết trận (BLV + link stream) ======
+async function handleDetail(detailPageUrl, sourceUrl) {
+  const pageRes = await fetch(detailPageUrl, {
+    headers: { "User-Agent": UA, "Referer": sourceUrl + "/" }
+  });
+  if (!pageRes.ok) {
+    return Response.json({ error: "Không tải được trang chi tiết" }, { status: 500, headers: corsHeaders() });
+  }
+  const html = await pageRes.text();
+
+  // 1. Lấy tiêu đề
+  const titleMatch = html.match(/<h1>([\s\S]*?)<\/h1>/);
+  const title = titleMatch ? titleMatch[1].replace(/\s+/g, " ").trim() : "";
+
+  // 2. Lấy giải đấu
+  const leagueMatch = html.match(/<div class="title_box">[\s\S]*?<span>(.*?)<\/span>/);
+  const league = leagueMatch ? leagueMatch[1].trim() : "";
+
+  // 3. Lấy list_stream (mảng 2 chiều các URL ajax)
+  let listStream = [];
+  const streamMatch = html.match(/var list_stream = (\[[\s\S]*?\]);/);
+  if (streamMatch) {
+    try { listStream = JSON.parse(streamMatch[1]); } catch (e) {}
+  }
+
+  // 4. Lấy tên BLV (player-link)
+  const blvList = [];
+  const blvRe = /<a[^>]*class="[^"]*player-link[^"]*"[^>]*data-link="(\d+)"[^>]*>([\s\S]*?)<\/a>/g;
+  let blvMatch;
+  while ((blvMatch = blvRe.exec(html)) !== null) {
+    const linkIndex = parseInt(blvMatch[1]);
+    const name = blvMatch[2].replace(/<[^>]+>/g, "").trim();
+    const streamUrls = listStream[linkIndex] || [];
+    blvList.push({
+      index: linkIndex,
+      name: name,
+      stream_ajax_urls: streamUrls
+    });
+  }
+
+  return Response.json({
+    title,
+    league,
+    blv_list: blvList,
+    total_links: listStream.length
+  }, { headers: corsHeaders() });
+}
+
+// ====== ENDPOINT 3: Lấy m3u8 thật từ ajax stream URL ======
+async function handleStream(ajaxUrl, sourceUrl) {
+  const res = await fetch(ajaxUrl, {
+    headers: {
+      "User-Agent": UA,
+      "Referer": sourceUrl + "/",
+      "Origin": sourceUrl
+    },
+    redirect: "follow"
+  });
+
+  if (!res.ok) {
+    return Response.json({ error: `L\u1ed7i khi fetch stream: HTTP ${res.status}` }, { status: 500, headers: corsHeaders() });
+  }
+
+  const html = await res.text();
+
+  let m3u8Url = null;
+
+  // Pattern 1: Tìm trực tiếp URL .m3u8
+  const m3u8Match = html.match(/https?:\/\/[^\s"'<>\\]+\.m3u8[^\s"'<>\\]*/);
+  if (m3u8Match) {
+    m3u8Url = m3u8Match[0];
+  }
+
+  // Pattern 2: Tìm trong các biến JS
+  if (!m3u8Url) {
+    const srcMatch = html.match(/(?:src|source|file|url|stream)\s*[:=]\s*["'](https?:\/\/[^"']+)/i);
+    if (srcMatch) {
+      m3u8Url = srcMatch[1];
+    }
+  }
+
+  // Pattern 3: Tìm trong iframe src
+  if (!m3u8Url) {
+    const iframeMatch = html.match(/<iframe[^>]*src=["']([^"']+)["']/);
+    if (iframeMatch) {
+      m3u8Url = iframeMatch[1];
+    }
+  }
+
+  return Response.json({
+    ajax_url: ajaxUrl,
+    m3u8_url: m3u8Url,
+    raw_html_length: html.length,
+    raw_html_preview: html.substring(0, 500)
+  }, { headers: corsHeaders() });
+}
+
+// ====== ROUTER ======
 export default {
   async fetch(request, env, ctx) {
-    if (request.method !== "GET") {
-      return new Response("Method not allowed", { status: 405 });
+    if (request.method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: corsHeaders() });
     }
+
+    const url = new URL(request.url);
+    const sourceUrl = await getSourceUrl();
 
     try {
-      let sourceUrl = FALLBACK_DOMAIN;
-      try {
-        const configRes = await fetch(DEFAULT_CONFIG_URL);
-        if (configRes.ok) {
-          const config = await configRes.json();
-          if (config.source_url) {
-            sourceUrl = config.source_url;
-          }
+      if (url.pathname === "/detail") {
+        const detailUrl = url.searchParams.get("url");
+        if (!detailUrl) {
+          return Response.json({ error: "Thi\u1ebfu tham s\u1ed1 ?url=" }, { status: 400, headers: corsHeaders() });
         }
-      } catch (e) {}
-
-      const pageRes = await fetch(sourceUrl, {
-        headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" }
-      });
-
-      if (!pageRes.ok) {
-        return Response.json({ error: "Không kết nối được web", status: pageRes.status }, { status: 500 });
+        return await handleDetail(detailUrl, sourceUrl);
       }
 
-      const htmlText = await pageRes.text();
-      
-      const matches = [];
-      const re = /<div class="h-time">([^<]+)<\/div>.*?<div class="h-team-name">([^<]+)<\/div>.*?<div class="h-team-name">([^<]+)<\/div>/gs;
-      let m;
-      let idCounter = 1;
-      while ((m = re.exec(htmlText)) !== null) {
-          matches.push({
-             id: idCounter.toString(),
-             time: m[1].trim(),
-             home_team: m[2].trim(),
-             away_team: m[3].trim(),
-             is_live: m[1].toLowerCase().includes("trực tiếp") || m[1].toLowerCase().includes("hiệp") || m[1].toLowerCase().includes("live"),
-             stream_url: "http://sample.vodobox.net/skate_phantom_flex_4k/skate_phantom_flex_4k.m3u8" // Mock video link
-          });
-          idCounter++;
+      if (url.pathname === "/stream") {
+        const streamAjaxUrl = url.searchParams.get("url");
+        if (!streamAjaxUrl) {
+          return Response.json({ error: "Thi\u1ebfu tham s\u1ed1 ?url=" }, { status: 400, headers: corsHeaders() });
+        }
+        return await handleStream(streamAjaxUrl, sourceUrl);
       }
 
-      return Response.json({
-        source: sourceUrl,
-        api_data_detected: true,
-        message: "Dữ liệu thông tin trận ĐÃ ĐƯỢC CÀO THỰC TẾ từ trang chủ. (Link video vẫn là mẫu do Xoilac ẩn stream dưới iframe)",
-        matches: matches
-      }, {
-        headers: {
-          "Access-Control-Allow-Origin": "*",
-          "Content-Type": "application/json"
-        }
-      });
+      return await handleHome(sourceUrl);
+
     } catch (err) {
-      return Response.json({ error: err.message }, { status: 500 });
+      return Response.json({ error: err.message }, { status: 500, headers: corsHeaders() });
     }
-  },
+  }
 };
