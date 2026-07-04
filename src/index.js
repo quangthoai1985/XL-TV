@@ -99,11 +99,6 @@ async function handleHome(sourceUrl) {
       const elapsedMatch = block.match(/<p[^>]*id="elapsedTime"[^>]*>([^<]+)<\/p>/);
       if (elapsedMatch && elapsedMatch[1].trim() !== "") {
         time = elapsedMatch[1].trim();
-      } else {
-        const dataTimeMatch = block.match(/data-time="([^"]+)"/);
-        if (dataTimeMatch && dataTimeMatch[1].trim() !== "") {
-          time = dataTimeMatch[1].trim();
-        }
       }
 
       const isLive = /tr\u1ef1c ti\u1ebfp|hi\u1ec7p|live|\u0111ang|ph\u00fat/i.test(time) || block.includes('grid-match__status--live') || block.includes('live-gif');
