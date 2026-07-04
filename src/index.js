@@ -32,7 +32,8 @@ const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
 
 // ====== ENDPOINT 1: Danh sách trận ======
 async function handleHome(sourceUrl) {
-  const pageRes = await fetch(sourceUrl, { headers: { "User-Agent": UA } });
+  const targetUrl = sourceUrl.replace(/\/$/, "") + "/truc-tiep/";
+  const pageRes = await fetch(targetUrl, { headers: { "User-Agent": UA } });
   if (!pageRes.ok) {
     return Response.json({ error: "Không kết nối được web nguồn" }, { status: 500, headers: corsHeaders() });
   }
