@@ -53,14 +53,26 @@ async function handleHome(sourceUrl, noCache) {
   const addedUrls = new Set();
   let id = 1;
 
-  function addMatch(detailUrl, timeText, home, away, isLive, homeLogo, awayLogo, homeScore, awayScore) {
+  // Giải mã các HTML entity phổ biến trong tên đội/giải
+  function decodeEntities(s) {
+    return s
+      .replace(/&amp;/g, "&")
+      .replace(/&#0?39;/g, "'")
+      .replace(/&#0?34;|&quot;/g, '"')
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&nbsp;/g, " ")
+      .trim();
+  }
+
+  function addMatch(detailUrl, timeText, home, away, isLive, homeLogo, awayLogo, homeScore, awayScore, league, leagueLogo) {
     if (!detailUrl) return;
     if (detailUrl.startsWith("/")) {
       detailUrl = sourceUrl.replace(/\/$/, "") + detailUrl;
     }
     if (addedUrls.has(detailUrl)) return;
     addedUrls.add(detailUrl);
-    
+
     matches.push({
       id: (id++).toString(),
       time: timeText,
@@ -71,6 +83,8 @@ async function handleHome(sourceUrl, noCache) {
       home_score: homeScore,
       away_score: awayScore,
       is_live: isLive,
+      league: league || "",
+      league_logo: leagueLogo || "",
       detail_url: detailUrl,
       stream_url: ""
     });
@@ -94,6 +108,21 @@ async function handleHome(sourceUrl, noCache) {
     const homeLogo = logoMatches.length > 0 ? logoMatches[0][1] : "";
     const awayLogo = logoMatches.length > 1 ? logoMatches[1][1] : "";
 
+    // Tên giải + logo giải (khối gmd-match-league ở đầu mỗi card)
+    let league = "";
+    let leagueLogo = "";
+    const leagueBlock = block.match(/gmd-match-league([\s\S]*?)<\/div>/);
+    if (leagueBlock) {
+      const seg = leagueBlock[1];
+      const compImg = seg.match(/<img[^>]*gmd-comp_logo[^>]*>/);
+      if (compImg) {
+        const srcM = compImg[0].match(/src=["']([^"']+)["']/);
+        if (srcM) leagueLogo = srcM[1];
+      }
+      const nameM = seg.match(/text-ellipsis[^>]*>([^<]+)</) || seg.match(/data-attr="[^"]*"[^>]*>([^<]+)</);
+      if (nameM) league = decodeEntities(nameM[1]);
+    }
+
     let homeScore = "";
     let awayScore = "";
     const homeScoreMatch = block.match(/<div[^>]*class=["'][^"']*gmd_home-score[^"']*["'][^>]*>[\s\S]*?<p>([^<]+)<\/p>/);
@@ -112,7 +141,7 @@ async function handleHome(sourceUrl, noCache) {
       }
 
       const isLive = /trực tiếp|hiệp|live|đang|phút/i.test(time) || block.includes('grid-match__status--live') || block.includes('live-gif');
-      addMatch(url, time, teamMatches[0][1].trim(), teamMatches[1][1].trim(), isLive, homeLogo, awayLogo, homeScore, awayScore);
+      addMatch(url, time, decodeEntities(teamMatches[0][1]), decodeEntities(teamMatches[1][1]), isLive, homeLogo, awayLogo, homeScore, awayScore, league, leagueLogo);
     }
   }
 
