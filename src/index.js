@@ -354,8 +354,25 @@ function proxyCorsHeaders() {
   };
 }
 
+// base64url <-> chuỗi. Dùng để "giấu" domain nguồn khỏi query string, tránh bị
+// phần mềm diệt virus / bộ lọc web (ESET, ad-block, DNS filter) chặn vì thấy
+// domain streaming trong URL. App Android vẫn dùng ?url= dạng thường (không đụng).
+function b64urlEncode(s) {
+  const b = btoa(unescape(encodeURIComponent(s)));
+  return b.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+function b64urlDecode(v) {
+  if (!v) return "";
+  let s = v.replace(/-/g, "+").replace(/_/g, "/");
+  while (s.length % 4) s += "=";
+  try { return decodeURIComponent(escape(atob(s))); } catch (e) {
+    try { return atob(s); } catch (e2) { return ""; }
+  }
+}
+
 async function handleProxy(request, url, ctx) {
-  const target = url.searchParams.get("u");
+  // Nhận cả dạng thường (?u=) lẫn base64url (?u64=) để tương thích.
+  const target = url.searchParams.get("u") || b64urlDecode(url.searchParams.get("u64"));
   if (!target) return new Response("thiếu ?u=", { status: 400, headers: proxyCorsHeaders() });
 
   let t;
@@ -366,12 +383,13 @@ async function handleProxy(request, url, ctx) {
     return new Response("chỉ hỗ trợ http/https", { status: 400, headers: proxyCorsHeaders() });
   }
 
-  const ref = url.searchParams.get("ref") || "";
-  const org = url.searchParams.get("org") || "";
+  const ref = url.searchParams.get("ref") || b64urlDecode(url.searchParams.get("ref64")) || "";
+  const org = url.searchParams.get("org") || b64urlDecode(url.searchParams.get("org64")) || "";
 
   const pathAndQuery = t.pathname + t.search;
   const isPlaylist = /\.m3u8(\?|$)/i.test(pathAndQuery);
   const isSegment = /\.(ts|m4s|aac|mp4|m4a|mpd|key|vtt)(\?|$)/i.test(pathAndQuery);
+  const isImage = /\.(png|jpe?g|webp|gif|svg|ico)(\?|$)/i.test(pathAndQuery);
 
   // Header gắn hộ để CDN chấp nhận request (giống ExoPlayer bên Android).
   const reqHeaders = { "User-Agent": STREAM_UA };
@@ -380,10 +398,10 @@ async function handleProxy(request, url, ctx) {
   const range = request.headers.get("Range");
   if (range) reqHeaders["Range"] = range;
 
-  // Cache segment ở edge: nhiều người xem cùng 1 trận chỉ fetch origin 1 lần.
+  // Cache segment/ảnh ở edge: nhiều người xem cùng 1 trận chỉ fetch origin 1 lần.
   const cache = caches.default;
   let cacheKey = null;
-  if (isSegment && !range) {
+  if ((isSegment || isImage) && !range) {
     cacheKey = new Request(request.url, { method: "GET" });
     const hit = await cache.match(cacheKey);
     if (hit) return hit;
@@ -414,7 +432,7 @@ async function handleProxy(request, url, ctx) {
   const respHeaders = {
     ...proxyCorsHeaders(),
     "Content-Type": ct || "application/octet-stream",
-    "Cache-Control": isSegment ? "public, max-age=8" : "no-store"
+    "Cache-Control": isImage ? "public, max-age=86400" : (isSegment ? "public, max-age=8" : "no-store")
   };
   const cl = originResp.headers.get("Content-Length"); if (cl) respHeaders["Content-Length"] = cl;
   const ar = originResp.headers.get("Accept-Ranges"); if (ar) respHeaders["Accept-Ranges"] = ar;
@@ -422,7 +440,7 @@ async function handleProxy(request, url, ctx) {
 
   const resp = new Response(originResp.body, { status: originResp.status, headers: respHeaders });
 
-  if (isSegment && !range && originResp.status === 200 && cacheKey) {
+  if ((isSegment || isImage) && !range && originResp.status === 200 && cacheKey) {
     ctx.waitUntil(cache.put(cacheKey, resp.clone()));
   }
   return resp;
@@ -433,9 +451,10 @@ function rewritePlaylist(text, baseUrl, workerOrigin, ref, org) {
   const toProxy = (u) => {
     let abs;
     try { abs = new URL(u, baseUrl).toString(); } catch (e) { return u; }
-    let s = workerOrigin + "/proxy?u=" + encodeURIComponent(abs);
-    if (ref) s += "&ref=" + encodeURIComponent(ref);
-    if (org) s += "&org=" + encodeURIComponent(org);
+    // Mã hoá base64url để bộ lọc web (ESET…) không thấy domain nguồn trong URL.
+    let s = workerOrigin + "/proxy?u64=" + b64urlEncode(abs);
+    if (ref) s += "&ref64=" + b64urlEncode(ref);
+    if (org) s += "&org64=" + b64urlEncode(org);
     return s;
   };
   return text.split("\n").map((line) => {
@@ -492,7 +511,8 @@ export default {
 
     try {
       if (url.pathname === "/detail") {
-        const detailUrl = url.searchParams.get("url");
+        // ?url= (app Android) hoặc ?u64= base64url (web, để né bộ lọc ESET…)
+        const detailUrl = url.searchParams.get("url") || b64urlDecode(url.searchParams.get("u64"));
         if (!detailUrl) {
           return Response.json({ error: "Thiếu tham số ?url=" }, { status: 400, headers: corsHeaders() });
         }
@@ -500,7 +520,7 @@ export default {
       }
 
       if (url.pathname === "/stream") {
-        const streamAjaxUrl = url.searchParams.get("url");
+        const streamAjaxUrl = url.searchParams.get("url") || b64urlDecode(url.searchParams.get("u64"));
         if (!streamAjaxUrl) {
           return Response.json({ error: "Thiếu tham số ?url=" }, { status: 400, headers: corsHeaders() });
         }
@@ -671,6 +691,11 @@ var API = location.origin;
 var src = 'xoilac86';
 var hls = null, flv = null;
 
+// Mã hoá base64url để domain nguồn không lộ trong URL -> né bộ lọc web (ESET, ad-block…)
+function b64(s){ return btoa(unescape(encodeURIComponent(s))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,''); }
+// Bọc URL ảnh (logo) qua /proxy để ESET không chặn khi tải trực tiếp từ domain nguồn.
+function imgProxy(u){ return u ? (API + '/proxy?u64=' + b64(u)) : u; }
+
 var grid = document.getElementById('grid');
 var statusEl = document.getElementById('status');
 var countEl = document.getElementById('count');
@@ -712,7 +737,7 @@ function renderMatches(list){
     var card = el('div', 'card' + (m.is_live ? ' live' : ''));
 
     var head = el('div', 'chead');
-    if(m.league_logo){ var li = el('img'); li.src = m.league_logo; li.onerror = function(){ li.style.display='none'; }; head.appendChild(li); }
+    if(m.league_logo){ var li = el('img'); li.src = imgProxy(m.league_logo); li.onerror = function(){ li.style.display='none'; }; head.appendChild(li); }
     var lg = el('div', 'league'); lg.textContent = (m.league || '').toUpperCase(); head.appendChild(lg);
     if(m.is_live){ var bl = el('div', 'badge-live'); bl.textContent = '● LIVE'; head.appendChild(bl); }
     card.appendChild(head);
@@ -738,7 +763,7 @@ function teamCol(name, logo){
   var col = el('div', 'team');
   var lo = el('div', 'tlogo');
   if(logo){
-    var img = el('img'); img.src = logo; img.alt = name || '';
+    var img = el('img'); img.src = imgProxy(logo); img.alt = name || '';
     img.onerror = function(){ lo.innerHTML = ''; var sp = el('span'); sp.textContent = (name||'?').charAt(0).toUpperCase(); lo.appendChild(sp); };
     lo.appendChild(img);
   } else {
@@ -757,7 +782,7 @@ function openMatch(m){
   pinfo.textContent = 'Chọn bình luận viên bên dưới để xem';
   overlay.classList.add('show');
   showPmsg('');
-  fetch(API + '/detail?url=' + encodeURIComponent(m.detail_url) + '&src=' + src)
+  fetch(API + '/detail?u64=' + b64(m.detail_url) + '&src=' + src)
     .then(function(r){ return r.json(); })
     .then(function(d){ renderBlv((d && d.blv_list) || []); })
     .catch(function(e){ document.getElementById('blvhead').textContent = '⚠️ Lỗi tải BLV: ' + e.message; });
@@ -791,7 +816,7 @@ function renderBlv(blvs){
 function tryLink(urls, i){
   if(i >= urls.length){ showPmsg('❌ Không phát được (đã thử hết link)'); return; }
   showPmsg('⏳ Đang kết nối link ' + (i+1) + '/' + urls.length + '...');
-  fetch(API + '/stream?url=' + encodeURIComponent(urls[i]) + '&src=' + src)
+  fetch(API + '/stream?u64=' + b64(urls[i]) + '&src=' + src)
     .then(function(r){ return r.json(); })
     .then(function(s){
       if(s && s.stream_url){ playStream(s, function(){ tryLink(urls, i+1); }); }
@@ -816,9 +841,9 @@ function destroyPlayers(){
 function playStream(s, onFail){
   destroyPlayers();
   var type = inferType(s.stream_url, s.stream_type);
-  var proxied = API + '/proxy?u=' + encodeURIComponent(s.stream_url);
-  if(s.referer) proxied += '&ref=' + encodeURIComponent(s.referer);
-  if(s.origin) proxied += '&org=' + encodeURIComponent(s.origin);
+  var proxied = API + '/proxy?u64=' + b64(s.stream_url);
+  if(s.referer) proxied += '&ref64=' + b64(s.referer);
+  if(s.origin) proxied += '&org64=' + b64(s.origin);
 
   var failed = false;
   function fail(){ if(!failed){ failed = true; if(onFail) onFail(); } }
