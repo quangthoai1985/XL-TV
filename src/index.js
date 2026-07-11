@@ -101,10 +101,12 @@ async function handleHome(sourceUrl, noCache) {
   }
   const html = await pageRes.text();
 
-  // Tự nhận diện template rồi parse
-  const matches = html.includes("grid-match__team--name")
-    ? parseListB(html, sourceUrl)
-    : parseListA(html, sourceUrl);
+  // Chạy cả 2 parser rồi lấy cái ra nhiều trận hơn.
+  // (Hai template loại trừ lẫn nhau nên cái sai sẽ ra 0 → cách này chắc chắn hơn
+  //  việc dò chuỗi, tránh nhầm khi trang có class template ẩn.)
+  const a = parseListA(html, sourceUrl);
+  const b = parseListB(html, sourceUrl);
+  const matches = b.length > a.length ? b : a;
 
   return Response.json({ source: sourceUrl, total: matches.length, matches }, { headers: corsHeaders() });
 }
