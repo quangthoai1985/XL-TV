@@ -1,4 +1,4 @@
-name = "xl-tv-backend"
+name = "xl-tv"
 main = "src/index.js"
 compatibility_date = "2023-12-01"
 
