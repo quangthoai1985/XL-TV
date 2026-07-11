@@ -700,7 +700,7 @@ var src = 'xoilac86';
 var hls = null, flv = null;
 
 // Mã hoá base64url để domain nguồn không lộ trong URL -> né bộ lọc web (ESET, ad-block…)
-function b64(s){ return btoa(unescape(encodeURIComponent(s))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,''); }
+function b64(s){ return btoa(unescape(encodeURIComponent(s))).replace(/\\+/g,'-').replace(/\\//g,'_').replace(/=+$/,''); }
 // Bọc URL ảnh (logo) qua /proxy để ESET không chặn khi tải trực tiếp từ domain nguồn.
 function imgProxy(u){ return u ? (API + '/proxy?u64=' + b64(u)) : u; }
 
