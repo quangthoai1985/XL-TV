@@ -332,6 +332,9 @@ async function handleStream(ajaxUrl, sourceUrl) {
     ajax_url: ajaxUrl,
     stream_url: streamUrl,
     stream_type: streamType,
+    // Referer/Origin để app gắn header khi phát (CDN thường chặn nếu thiếu)
+    referer: sourceUrl.replace(/\/$/, "") + "/",
+    origin: sourceUrl.replace(/\/$/, ""),
   }, { headers: corsHeaders() });
 }
 
