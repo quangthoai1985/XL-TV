@@ -292,6 +292,21 @@ export default {
     const noCache = url.searchParams.has("t") || url.searchParams.has("refresh");
 
     try {
+      // ===== TẠM THỜI: endpoint recon, chỉ cho 3 host đã biết, sẽ xoá sau =====
+      if (url.pathname === "/debug") {
+        const t = url.searchParams.get("url");
+        const allow = /^https:\/\/([a-z0-9-]+\.)?(xoilacz\.vip|xoilaczwwz\.tv|inyoureyesmovie\.com)(\/|$)/i;
+        if (!t || !allow.test(t)) {
+          return new Response("blocked", { status: 400, headers: { "Access-Control-Allow-Origin": "*" } });
+        }
+        const r = await fetch(t, { headers: { "User-Agent": UA }, redirect: "follow", cf: { cacheTtl: 0, cacheEverything: false } });
+        const body = await r.text();
+        return new Response(body, {
+          status: 200,
+          headers: { "Access-Control-Allow-Origin": "*", "Content-Type": "text/plain; charset=utf-8", "X-Final-Url": r.url }
+        });
+      }
+
       if (url.pathname === "/detail") {
         const detailUrl = url.searchParams.get("url");
         if (!detailUrl) {
