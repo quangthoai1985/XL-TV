@@ -90,7 +90,10 @@ function makeMatch(id, time, home, away, isLive, homeLogo, awayLogo, league, lea
 }
 
 // ====== ENDPOINT 1: Danh sách trận ======
-async function handleHome(sourceUrl, noCache) {
+// enc=true (bản web): mã hoá detail_url + ẩn source để domain nguồn không xuất hiện
+// trong JSON -> tránh phần mềm diệt virus (ESET) quét body và chặn/treo request fetch.
+// App Android gọi không có enc -> nhận detail_url dạng thường như cũ.
+async function handleHome(sourceUrl, noCache, enc) {
   const targetUrl = sourceUrl.replace(/\/$/, "") + "/truc-tiep/";
   const fetchOpts = { headers: { "User-Agent": UA }, redirect: "follow" };
   // Khi app bấm "Tải lại", ép cào trực tiếp trang nguồn, bỏ qua cache Cloudflare
@@ -108,6 +111,11 @@ async function handleHome(sourceUrl, noCache) {
   const b = parseListB(html, sourceUrl);
   const matches = b.length > a.length ? b : a;
 
+  if (enc) {
+    // Giấu domain nguồn: detail_url -> base64url. Web sẽ gửi lại thẳng qua ?u64=.
+    for (const m of matches) m.detail_url = b64urlEncode(m.detail_url);
+    return Response.json({ source: "", total: matches.length, matches }, { headers: corsHeaders() });
+  }
   return Response.json({ source: sourceUrl, total: matches.length, matches }, { headers: corsHeaders() });
 }
 
@@ -527,7 +535,7 @@ export default {
         return await handleStream(streamAjaxUrl, baseUrl);
       }
 
-      return await handleHome(baseUrl, noCache);
+      return await handleHome(baseUrl, noCache, url.searchParams.get("enc") === "1");
     } catch (err) {
       return Response.json({ error: err.message }, { status: 500, headers: corsHeaders() });
     }
@@ -717,7 +725,7 @@ function loadMatches(){
   grid.innerHTML = '';
   var reloadBtn = document.getElementById('reload');
   reloadBtn.disabled = true; reloadBtn.textContent = '⏳ Đang tải...';
-  fetch(API + '/?src=' + src + '&t=' + Date.now())
+  fetch(API + '/?src=' + src + '&enc=1&t=' + Date.now())
     .then(function(r){ return r.json(); })
     .then(function(data){
       var list = (data && data.matches) || [];
@@ -782,7 +790,7 @@ function openMatch(m){
   pinfo.textContent = 'Chọn bình luận viên bên dưới để xem';
   overlay.classList.add('show');
   showPmsg('');
-  fetch(API + '/detail?u64=' + b64(m.detail_url) + '&src=' + src)
+  fetch(API + '/detail?u64=' + m.detail_url + '&src=' + src) // detail_url đã là base64url từ server
     .then(function(r){ return r.json(); })
     .then(function(d){ renderBlv((d && d.blv_list) || []); })
     .catch(function(e){ document.getElementById('blvhead').textContent = '⚠️ Lỗi tải BLV: ' + e.message; });
