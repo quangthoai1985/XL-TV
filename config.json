@@ -1,4 +1,8 @@
 {
+  "sources": {
+    "xoilac86": "https://inyoureyesmovie.com",
+    "xoilacz": "https://xoilaczwwz.tv"
+  },
   "source_url": "https://inyoureyesmovie.com",
-  "note": "Cập nhật link này khi trang web nguồn đổi domain"
+  "note": "Cap nhat domain trong 'sources' khi trang nguon doi domain. xoilac86=inyoureyesmovie (template A), xoilacz=xoilaczwwz (template B)."
 }

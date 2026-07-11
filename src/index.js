@@ -1,29 +1,45 @@
 /**
  * XL-TV Scraper — Cloudflare Worker
- * 
+ *
+ * Hỗ trợ 2 nguồn (chọn qua ?src=):
+ *   - xoilac86 (mặc định) → inyoureyesmovie.com   (template A: class="grid-match", tên đội <p>)
+ *   - xoilacz             → xoilaczwwz.tv          (template B: grid-match__body, tên đội <div>)
+ *
  * Endpoints:
- *   GET /             → Danh sách trận đấu (scrape từ trang chủ)
- *   GET /detail?url=X → Chi tiết trận: BLV, link stream (scrape trang chi tiết)
- *   GET /stream?url=X → Proxy fetch iframe stream → trả về URL stream thật
+ *   GET /?src=X             → Danh sách trận đấu
+ *   GET /detail?url=X&src=Y → Chi tiết trận: BLV + link stream
+ *   GET /stream?url=X&src=Y → Lấy URL stream thật
  */
 
 const DEFAULT_CONFIG_URL = "https://raw.githubusercontent.com/quangthoai1985/XL-TV/main/config.json";
-const FALLBACK_DOMAIN = "https://inyoureyesmovie.com";
 
-async function getSourceUrl() {
+// Domain mặc định cho mỗi nguồn (dùng khi config.json không có).
+const SOURCE_DEFAULTS = {
+  xoilac86: "https://inyoureyesmovie.com",
+  xoilacz: "https://xoilaczwwz.tv"
+};
+
+// Đọc config.json trên GitHub (luôn lấy bản mới nhất, bỏ qua cache).
+async function getConfig() {
   try {
-    // Cache-bust để luôn lấy config.json MỚI NHẤT trên GitHub.
-    // (query "?_=" phá cache Fastly của GitHub, cf.cacheTtl=0 phá cache Cloudflare)
     const res = await fetch(DEFAULT_CONFIG_URL + "?_=" + Date.now(), {
       cf: { cacheTtl: 0, cacheEverything: false },
       headers: { "Cache-Control": "no-cache", "Pragma": "no-cache" }
     });
-    if (res.ok) {
-      const config = await res.json();
-      if (config.source_url) return config.source_url;
-    }
+    if (res.ok) return await res.json();
   } catch (e) {}
-  return FALLBACK_DOMAIN;
+  return null;
+}
+
+// Chọn domain nguồn theo srcKey. Cho phép sửa domain động qua config.json.
+function resolveBase(config, srcKey) {
+  const key = srcKey === "xoilacz" ? "xoilacz" : "xoilac86";
+  if (config) {
+    if (config.sources && config.sources[key]) return config.sources[key];
+    // Tương thích ngược: config cũ chỉ có source_url → dùng cho xoilac86
+    if (key === "xoilac86" && config.source_url) return config.source_url;
+  }
+  return SOURCE_DEFAULTS[key];
 }
 
 function corsHeaders() {
@@ -37,10 +53,46 @@ function corsHeaders() {
 
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
+// Giải mã các HTML entity phổ biến trong tên đội/giải
+function decodeEntities(s) {
+  return s
+    .replace(/&amp;/g, "&")
+    .replace(/&#0?39;/g, "'")
+    .replace(/&#0?34;|&quot;/g, '"')
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&nbsp;/g, " ")
+    .trim();
+}
+
+// Thêm domain nếu là đường dẫn tương đối
+function absUrl(base, u) {
+  if (u && u.startsWith("/")) return base.replace(/\/$/, "") + u;
+  return u;
+}
+
+function makeMatch(id, time, home, away, isLive, homeLogo, awayLogo, league, leagueLogo, detailUrl) {
+  return {
+    id: id.toString(),
+    time,
+    home_team: home,
+    away_team: away,
+    home_logo: homeLogo,
+    away_logo: awayLogo,
+    home_score: "",
+    away_score: "",
+    is_live: isLive,
+    league: league || "",
+    league_logo: leagueLogo || "",
+    detail_url: detailUrl,
+    stream_url: ""
+  };
+}
+
 // ====== ENDPOINT 1: Danh sách trận ======
 async function handleHome(sourceUrl, noCache) {
   const targetUrl = sourceUrl.replace(/\/$/, "") + "/truc-tiep/";
-  const fetchOpts = { headers: { "User-Agent": UA } };
+  const fetchOpts = { headers: { "User-Agent": UA }, redirect: "follow" };
   // Khi app bấm "Tải lại", ép cào trực tiếp trang nguồn, bỏ qua cache Cloudflare
   if (noCache) fetchOpts.cf = { cacheTtl: 0, cacheEverything: false };
   const pageRes = await fetch(targetUrl, fetchOpts);
@@ -49,103 +101,105 @@ async function handleHome(sourceUrl, noCache) {
   }
   const html = await pageRes.text();
 
+  // Tự nhận diện template rồi parse
+  const matches = html.includes("grid-match__team--name")
+    ? parseListB(html, sourceUrl)
+    : parseListA(html, sourceUrl);
+
+  return Response.json({ source: sourceUrl, total: matches.length, matches }, { headers: corsHeaders() });
+}
+
+// --- Template A: inyoureyesmovie.com (class="grid-match", tên đội trong <p>) ---
+function parseListA(html, sourceUrl) {
   const matches = [];
-  const addedUrls = new Set();
+  const added = new Set();
   let id = 1;
-
-  // Giải mã các HTML entity phổ biến trong tên đội/giải
-  function decodeEntities(s) {
-    return s
-      .replace(/&amp;/g, "&")
-      .replace(/&#0?39;/g, "'")
-      .replace(/&#0?34;|&quot;/g, '"')
-      .replace(/&lt;/g, "<")
-      .replace(/&gt;/g, ">")
-      .replace(/&nbsp;/g, " ")
-      .trim();
-  }
-
-  function addMatch(detailUrl, timeText, home, away, isLive, homeLogo, awayLogo, homeScore, awayScore, league, leagueLogo) {
-    if (!detailUrl) return;
-    if (detailUrl.startsWith("/")) {
-      detailUrl = sourceUrl.replace(/\/$/, "") + detailUrl;
-    }
-    if (addedUrls.has(detailUrl)) return;
-    addedUrls.add(detailUrl);
-
-    matches.push({
-      id: (id++).toString(),
-      time: timeText,
-      home_team: home,
-      away_team: away,
-      home_logo: homeLogo,
-      away_logo: awayLogo,
-      home_score: homeScore,
-      away_score: awayScore,
-      is_live: isLive,
-      league: league || "",
-      league_logo: leagueLogo || "",
-      detail_url: detailUrl,
-      stream_url: ""
-    });
-  }
-
-  // Phân tích grid-match (danh sách chính trong grid-matches)
   const gridBlocks = html.split('class="grid-match"');
   for (let i = 1; i < gridBlocks.length; i++) {
     const block = gridBlocks[i];
-    
+
     let url = null;
-    const urlMatches = [...gridBlocks[i-1].matchAll(/href="([^"]+)"/g)];
-    if (urlMatches.length > 0) {
-      url = urlMatches[urlMatches.length - 1][1];
-    }
+    const urlMatches = [...gridBlocks[i - 1].matchAll(/href="([^"]+)"/g)];
+    if (urlMatches.length > 0) url = urlMatches[urlMatches.length - 1][1];
 
-    const timeMatch = block.match(/<div class="grid-match__date[^>]*>\s*<span>([^<]+)<\/span>/);
     const teamMatches = [...block.matchAll(/<p>([^<]+)<\/p>/g)];
-    
-    const logoMatches = [...block.matchAll(/<img[^>]*src=["']([^"']+)["'][^>]*class=["'][^"']*team-logo-0[^"']*["'][^>]*>/g)];
-    const homeLogo = logoMatches.length > 0 ? logoMatches[0][1] : "";
-    const awayLogo = logoMatches.length > 1 ? logoMatches[1][1] : "";
+    if (!url || teamMatches.length < 2) continue;
 
-    // Tên giải + logo giải (khối gmd-match-league ở đầu mỗi card)
-    let league = "";
-    let leagueLogo = "";
+    const logoMatches = [...block.matchAll(/<img[^>]*src=["']([^"']+)["'][^>]*class=["'][^"']*team-logo-0[^"']*["'][^>]*>/g)];
+    const homeLogo = logoMatches[0] ? logoMatches[0][1] : "";
+    const awayLogo = logoMatches[1] ? logoMatches[1][1] : "";
+
+    let league = "", leagueLogo = "";
     const leagueBlock = block.match(/gmd-match-league([\s\S]*?)<\/div>/);
     if (leagueBlock) {
       const seg = leagueBlock[1];
       const compImg = seg.match(/<img[^>]*gmd-comp_logo[^>]*>/);
-      if (compImg) {
-        const srcM = compImg[0].match(/src=["']([^"']+)["']/);
-        if (srcM) leagueLogo = srcM[1];
-      }
+      if (compImg) { const s = compImg[0].match(/src=["']([^"']+)["']/); if (s) leagueLogo = s[1]; }
       const nameM = seg.match(/text-ellipsis[^>]*>([^<]+)</) || seg.match(/data-attr="[^"]*"[^>]*>([^<]+)</);
       if (nameM) league = decodeEntities(nameM[1]);
     }
 
-    let homeScore = "";
-    let awayScore = "";
-    const homeScoreMatch = block.match(/<div[^>]*class=["'][^"']*gmd_home-score[^"']*["'][^>]*>[\s\S]*?<p>([^<]+)<\/p>/);
-    const awayScoreMatch = block.match(/<div[^>]*class=["'][^"']*gmd_away-score[^"']*["'][^>]*>[\s\S]*?<p>([^<]+)<\/p>/);
-    if (homeScoreMatch && awayScoreMatch) {
-      homeScore = homeScoreMatch[1].trim();
-      awayScore = awayScoreMatch[1].trim();
-    }
+    const timeMatch = block.match(/<div class="grid-match__date[^>]*>\s*<span>([^<]+)<\/span>/);
+    let time = timeMatch ? timeMatch[1].trim() : "";
+    const elapsedMatch = block.match(/<p[^>]*id="elapsedTime"[^>]*>([^<]+)<\/p>/);
+    if (elapsedMatch && elapsedMatch[1].trim() !== "") time = elapsedMatch[1].trim();
 
-    if (url && teamMatches.length >= 2) {
-      let time = timeMatch ? timeMatch[1].trim() : "";
-      
-      const elapsedMatch = block.match(/<p[^>]*id="elapsedTime"[^>]*>([^<]+)<\/p>/);
-      if (elapsedMatch && elapsedMatch[1].trim() !== "") {
-        time = elapsedMatch[1].trim();
-      }
+    const isLive = /trực tiếp|hiệp|live|đang|phút/i.test(time) || block.includes('grid-match__status--live') || block.includes('live-gif');
 
-      const isLive = /trực tiếp|hiệp|live|đang|phút/i.test(time) || block.includes('grid-match__status--live') || block.includes('live-gif');
-      addMatch(url, time, decodeEntities(teamMatches[0][1]), decodeEntities(teamMatches[1][1]), isLive, homeLogo, awayLogo, homeScore, awayScore, league, leagueLogo);
-    }
+    const detailUrl = absUrl(sourceUrl, url);
+    if (added.has(detailUrl)) continue;
+    added.add(detailUrl);
+    matches.push(makeMatch(id++, time, decodeEntities(teamMatches[0][1]), decodeEntities(teamMatches[1][1]), isLive, homeLogo, awayLogo, league, leagueLogo, detailUrl));
   }
+  return matches;
+}
 
-  return Response.json({ source: sourceUrl, total: matches.length, matches }, { headers: corsHeaders() });
+// --- Template B: xoilaczwwz.tv (grid-match__body, tên đội trong <div class="grid-match__team--name">) ---
+function parseListB(html, sourceUrl) {
+  const matches = [];
+  const added = new Set();
+  let id = 1;
+  const parts = html.split("grid-match__header");
+  for (let i = 1; i < parts.length; i++) {
+    const block = parts[i];
+
+    // Link chi tiết: <a href="/truc-tiep/<slug>/"> nằm ở CUỐI phần trước (ngay trước card).
+    // Loại các href .../link/N (là link BLV, không phải trang chi tiết).
+    let url = null;
+    const hrefs = [...parts[i - 1].matchAll(/href="([^"]*\/truc-tiep\/[^"]*)"/g)]
+      .map(m => m[1])
+      .filter(h => !/\/link\//.test(h));
+    if (hrefs.length > 0) url = hrefs[hrefs.length - 1];
+
+    const homeM = block.match(/grid-match__team--home-name[^>]*>([^<]+)</);
+    const awayM = block.match(/grid-match__team--away-name[^>]*>([^<]+)</);
+    if (!url || !homeM || !awayM) continue;
+
+    const logoMatches = [...block.matchAll(/<img[^>]*src=["']([^"']+)["'][^>]*class=["'][^"']*team-logo-0[^"']*["'][^>]*>/g)];
+    const homeLogo = logoMatches[0] ? logoMatches[0][1] : "";
+    const awayLogo = logoMatches[1] ? logoMatches[1][1] : "";
+
+    let league = "", leagueLogo = "";
+    const leagueBlock = block.match(/grid-match__league([\s\S]*?)<\/div>/);
+    if (leagueBlock) {
+      const seg = leagueBlock[1];
+      const img = seg.match(/<img[^>]*src=["']([^"']+)["']/);
+      if (img) leagueLogo = img[1];
+      const nameM = seg.match(/text-ellipsis[^>]*>\s*([^<]+?)\s*</) || seg.match(/data-attr="[^"]*"[^>]*>\s*([^<]+?)\s*</);
+      if (nameM) league = decodeEntities(nameM[1]);
+    }
+
+    const timeM = block.match(/grid-match__date[^>]*>\s*([^<]+?)\s*</);
+    const time = timeM ? decodeEntities(timeM[1]) : "";
+
+    const isLive = block.includes('grid-match__status--live') || block.includes('grid-match--is-live') || block.includes('is-living');
+
+    const detailUrl = absUrl(sourceUrl, url);
+    if (added.has(detailUrl)) continue;
+    added.add(detailUrl);
+    matches.push(makeMatch(id++, time, decodeEntities(homeM[1]), decodeEntities(awayM[1]), isLive, homeLogo, awayLogo, league, leagueLogo, detailUrl));
+  }
+  return matches;
 }
 
 // ====== ENDPOINT 2: Chi tiết trận (BLV + link stream) ======
@@ -287,32 +341,20 @@ export default {
     }
 
     const url = new URL(request.url);
-    const sourceUrl = await getSourceUrl();
+    // Chọn nguồn qua ?src= (xoilac86 mặc định | xoilacz). Domain đọc từ config.json.
+    const config = await getConfig();
+    const srcKey = url.searchParams.get("src") === "xoilacz" ? "xoilacz" : "xoilac86";
+    const baseUrl = resolveBase(config, srcKey);
     // App gửi kèm ?t=<timestamp> mỗi lần tải/Tải lại → luôn lấy dữ liệu mới
     const noCache = url.searchParams.has("t") || url.searchParams.has("refresh");
 
     try {
-      // ===== TẠM THỜI: endpoint recon, chỉ cho 3 host đã biết, sẽ xoá sau =====
-      if (url.pathname === "/debug") {
-        const t = url.searchParams.get("url");
-        const allow = /^https:\/\/([a-z0-9-]+\.)?(xoilacz\.vip|xoilaczwwz\.tv|inyoureyesmovie\.com)(\/|$)/i;
-        if (!t || !allow.test(t)) {
-          return new Response("blocked", { status: 400, headers: { "Access-Control-Allow-Origin": "*" } });
-        }
-        const r = await fetch(t, { headers: { "User-Agent": UA }, redirect: "follow", cf: { cacheTtl: 0, cacheEverything: false } });
-        const body = await r.text();
-        return new Response(body, {
-          status: 200,
-          headers: { "Access-Control-Allow-Origin": "*", "Content-Type": "text/plain; charset=utf-8", "X-Final-Url": r.url }
-        });
-      }
-
       if (url.pathname === "/detail") {
         const detailUrl = url.searchParams.get("url");
         if (!detailUrl) {
           return Response.json({ error: "Thiếu tham số ?url=" }, { status: 400, headers: corsHeaders() });
         }
-        return await handleDetail(detailUrl, sourceUrl);
+        return await handleDetail(detailUrl, baseUrl);
       }
 
       if (url.pathname === "/stream") {
@@ -320,10 +362,10 @@ export default {
         if (!streamAjaxUrl) {
           return Response.json({ error: "Thiếu tham số ?url=" }, { status: 400, headers: corsHeaders() });
         }
-        return await handleStream(streamAjaxUrl, sourceUrl);
+        return await handleStream(streamAjaxUrl, baseUrl);
       }
 
-      return await handleHome(sourceUrl, noCache);
+      return await handleHome(baseUrl, noCache);
     } catch (err) {
       return Response.json({ error: err.message }, { status: 500, headers: corsHeaders() });
     }
