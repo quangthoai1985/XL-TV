@@ -1,23 +1,20 @@
 /**
  * XL-TV Scraper — Cloudflare Worker
  *
- * Hỗ trợ 2 nguồn (chọn qua ?src=):
- *   - xoilac86 (mặc định) → inyoureyesmovie.com   (template A: class="grid-match", tên đội <p>)
- *   - xoilacz             → xoilaczwwz.tv          (template B: grid-match__body, tên đội <div>)
+ * Nguồn duy nhất: xoilacz → xoilaczzyyz.tv (đổi domain trong config.json khi cần).
+ * (Nguồn cũ xoilac86 / inyoureyesmovie.com đã chết → gỡ bỏ. Tham số ?src= vẫn được
+ *  chấp nhận nhưng bỏ qua, để bản APK cũ đang gửi ?src=xoilac86 không bị hỏng.)
  *
  * Endpoints:
- *   GET /?src=X             → Danh sách trận đấu
- *   GET /detail?url=X&src=Y → Chi tiết trận: BLV + link stream
- *   GET /stream?url=X&src=Y → Lấy URL stream thật
+ *   GET /            → Danh sách trận đấu
+ *   GET /detail?url= → Chi tiết trận: BLV + link stream
+ *   GET /stream?url= → Lấy URL stream thật
  */
 
 const DEFAULT_CONFIG_URL = "https://raw.githubusercontent.com/quangthoai1985/XL-TV/main/config.json";
 
-// Domain mặc định cho mỗi nguồn (dùng khi config.json không có).
-const SOURCE_DEFAULTS = {
-  xoilac86: "https://inyoureyesmovie.com",
-  xoilacz: "https://xoilaczwwz.tv"
-};
+// Domain mặc định của nguồn (dùng khi config.json không đọc được).
+const SOURCE_DEFAULT = "https://xoilaczzyyz.tv";
 
 // Đọc config.json trên GitHub (luôn lấy bản mới nhất, bỏ qua cache).
 async function getConfig() {
@@ -31,15 +28,13 @@ async function getConfig() {
   return null;
 }
 
-// Chọn domain nguồn theo srcKey. Cho phép sửa domain động qua config.json.
-function resolveBase(config, srcKey) {
-  const key = srcKey === "xoilacz" ? "xoilacz" : "xoilac86";
+// Domain nguồn, sửa động qua config.json (không cần deploy lại Worker khi đổi domain).
+function resolveBase(config) {
   if (config) {
-    if (config.sources && config.sources[key]) return config.sources[key];
-    // Tương thích ngược: config cũ chỉ có source_url → dùng cho xoilac86
-    if (key === "xoilac86" && config.source_url) return config.source_url;
+    if (config.sources && config.sources.xoilacz) return config.sources.xoilacz;
+    if (config.source_url) return config.source_url;
   }
-  return SOURCE_DEFAULTS[key];
+  return SOURCE_DEFAULT;
 }
 
 function corsHeaders() {
@@ -119,7 +114,8 @@ async function handleHome(sourceUrl, noCache, enc) {
   return Response.json({ source: sourceUrl, total: matches.length, matches }, { headers: corsHeaders() });
 }
 
-// --- Template A: inyoureyesmovie.com (class="grid-match", tên đội trong <p>) ---
+// --- Template A: class="grid-match", tên đội trong <p> ---
+// Nguồn hiện tại dùng template B, giữ parser này làm dự phòng nếu nguồn đổi giao diện. ---
 function parseListA(html, sourceUrl) {
   const matches = [];
   const added = new Set();
@@ -164,7 +160,7 @@ function parseListA(html, sourceUrl) {
   return matches;
 }
 
-// --- Template B: xoilaczwwz.tv (grid-match__body, tên đội trong <div class="grid-match__team--name">) ---
+// --- Template B (nguồn hiện tại): grid-match__header, tên đội trong <div class="grid-match__team--name"> ---
 function parseListB(html, sourceUrl) {
   const matches = [];
   const added = new Set();
@@ -336,13 +332,25 @@ async function handleStream(ajaxUrl, sourceUrl) {
     }
   }
 
+  // Referer/Origin để app/proxy gắn header khi phát.
+  // QUAN TRỌNG: CDN kiểm tra Referer theo TRANG PLAYER (host của ajaxUrl, vd
+  // xlz.textliveupdaterz.com), KHÔNG phải domain trang nguồn (xoilacz…). Trình duyệt
+  // thật cũng gửi Referer = trang player vì player nằm trong iframe của host đó.
+  // Gửi sai domain -> CDN trả 403 -> không phát được. Fallback về sourceUrl nếu ajaxUrl lỗi.
+  let playRef = sourceUrl.replace(/\/$/, "") + "/";
+  let playOrg = sourceUrl.replace(/\/$/, "");
+  try {
+    const a = new URL(ajaxUrl);
+    playRef = a.origin + "/";
+    playOrg = a.origin;
+  } catch (e) {}
+
   return Response.json({
     ajax_url: ajaxUrl,
     stream_url: streamUrl,
     stream_type: streamType,
-    // Referer/Origin để app gắn header khi phát (CDN thường chặn nếu thiếu)
-    referer: sourceUrl.replace(/\/$/, "") + "/",
-    origin: sourceUrl.replace(/\/$/, ""),
+    referer: playRef,
+    origin: playOrg,
   }, { headers: corsHeaders() });
 }
 
@@ -510,10 +518,9 @@ export default {
       }
     }
 
-    // Chọn nguồn qua ?src= (xoilac86 mặc định | xoilacz). Domain đọc từ config.json.
+    // Chỉ còn 1 nguồn; ?src= (nếu app cũ còn gửi) bị bỏ qua. Domain đọc từ config.json.
     const config = await getConfig();
-    const srcKey = url.searchParams.get("src") === "xoilacz" ? "xoilacz" : "xoilac86";
-    const baseUrl = resolveBase(config, srcKey);
+    const baseUrl = resolveBase(config);
     // App gửi kèm ?t=<timestamp> mỗi lần tải/Tải lại → luôn lấy dữ liệu mới
     const noCache = url.searchParams.has("t") || url.searchParams.has("refresh");
 
@@ -574,13 +581,12 @@ const WEB_HTML = `<!doctype html>
     border-bottom:1px solid rgba(0,230,118,.18);
   }
   .logo{font-size:26px; font-weight:900; color:var(--accent); white-space:nowrap}
-  .srcbtn,.reload{
+  .reload{
     border:1px solid rgba(255,255,255,.2); background:var(--panel); color:#B9C2D0;
     border-radius:20px; padding:8px 16px; font-size:14px; cursor:pointer;
     font-weight:600; transition:.15s;
   }
-  .srcbtn:hover,.reload:hover{border-color:var(--accent); transform:translateY(-1px)}
-  .srcbtn.active{background:var(--accent); color:#000; border-color:var(--accent)}
+  .reload:hover{border-color:var(--accent); transform:translateY(-1px)}
   .count{margin-left:auto; background:var(--panel); color:#B9C2D0;
     border-radius:20px; padding:6px 14px; font-size:14px; font-weight:600}
   .reload{color:var(--accent); border-color:var(--accent)}
@@ -666,8 +672,6 @@ const WEB_HTML = `<!doctype html>
 <body>
 <header>
   <div class="logo">⚽ XL TV</div>
-  <button class="srcbtn active" id="s86">Xoilac86</button>
-  <button class="srcbtn" id="sz">XoilacZ</button>
   <div class="count" id="count">0 trận</div>
   <button class="reload" id="reload">🔄 Tải lại</button>
 </header>
@@ -696,7 +700,6 @@ const WEB_HTML = `<!doctype html>
 
 <script>
 var API = location.origin;
-var src = 'xoilac86';
 var hls = null, flv = null;
 
 // Mã hoá base64url để domain nguồn không lộ trong URL -> né bộ lọc web (ESET, ad-block…)
@@ -725,7 +728,7 @@ function loadMatches(){
   grid.innerHTML = '';
   var reloadBtn = document.getElementById('reload');
   reloadBtn.disabled = true; reloadBtn.textContent = '⏳ Đang tải...';
-  fetch(API + '/?src=' + src + '&enc=1&t=' + Date.now())
+  fetch(API + '/?enc=1&t=' + Date.now())
     .then(function(r){ return r.json(); })
     .then(function(data){
       var list = (data && data.matches) || [];
@@ -790,7 +793,7 @@ function openMatch(m){
   pinfo.textContent = 'Chọn bình luận viên bên dưới để xem';
   overlay.classList.add('show');
   showPmsg('');
-  fetch(API + '/detail?u64=' + m.detail_url + '&src=' + src) // detail_url đã là base64url từ server
+  fetch(API + '/detail?u64=' + m.detail_url) // detail_url đã là base64url từ server
     .then(function(r){ return r.json(); })
     .then(function(d){ renderBlv((d && d.blv_list) || []); })
     .catch(function(e){ document.getElementById('blvhead').textContent = '⚠️ Lỗi tải BLV: ' + e.message; });
@@ -824,7 +827,7 @@ function renderBlv(blvs){
 function tryLink(urls, i){
   if(i >= urls.length){ showPmsg('❌ Không phát được (đã thử hết link)'); return; }
   showPmsg('⏳ Đang kết nối link ' + (i+1) + '/' + urls.length + '...');
-  fetch(API + '/stream?u64=' + b64(urls[i]) + '&src=' + src)
+  fetch(API + '/stream?u64=' + b64(urls[i]))
     .then(function(r){ return r.json(); })
     .then(function(s){
       if(s && s.stream_url){ playStream(s, function(){ tryLink(urls, i+1); }); }
@@ -898,12 +901,6 @@ document.getElementById('fsbtn').onclick = function(){
   else if(video.webkitEnterFullscreen){ video.webkitEnterFullscreen(); }
 };
 
-document.getElementById('s86').onclick = function(){ if(src!=='xoilac86'){ src='xoilac86'; setSrcUI(); loadMatches(); } };
-document.getElementById('sz').onclick = function(){ if(src!=='xoilacz'){ src='xoilacz'; setSrcUI(); loadMatches(); } };
-function setSrcUI(){
-  document.getElementById('s86').classList.toggle('active', src==='xoilac86');
-  document.getElementById('sz').classList.toggle('active', src==='xoilacz');
-}
 document.getElementById('reload').onclick = loadMatches;
 document.addEventListener('keydown', function(e){ if(e.key==='Escape' && overlay.classList.contains('show') && !document.fullscreenElement) closeModal(); });
 
