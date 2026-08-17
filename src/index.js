@@ -16,16 +16,27 @@ const DEFAULT_CONFIG_URL = "https://raw.githubusercontent.com/quangthoai1985/XL-
 // Domain mặc định của nguồn (dùng khi config.json không đọc được).
 const SOURCE_DEFAULT = "https://xoilaczzffz.tv";
 
-// Đọc config.json trên GitHub (luôn lấy bản mới nhất, bỏ qua cache).
+// Đọc config.json trên GitHub, nhớ lại 60 giây.
+// KHÔNG cache-bust từng request: mỗi lần gọi /, /detail, /stream mà fetch lại GitHub
+// thì raw.githubusercontent trả 429 Too Many Requests → config coi như hỏng → Worker
+// âm thầm rơi về SOURCE_DEFAULT (đổi domain trong config.json không ăn). Cache 60s vừa
+// hết 429, vừa bớt 1 subrequest mỗi lần gọi API, mà sửa domain vẫn có tác dụng sau ~1 phút.
+let _cfgCache = { at: 0, value: null };
+const CONFIG_TTL_MS = 60 * 1000;
+
 async function getConfig() {
+  const now = Date.now();
+  if (_cfgCache.value && now - _cfgCache.at < CONFIG_TTL_MS) return _cfgCache.value;
   try {
-    const res = await fetch(DEFAULT_CONFIG_URL + "?_=" + Date.now(), {
-      cf: { cacheTtl: 0, cacheEverything: false },
-      headers: { "Cache-Control": "no-cache", "Pragma": "no-cache" }
-    });
-    if (res.ok) return await res.json();
+    const res = await fetch(DEFAULT_CONFIG_URL, { cf: { cacheTtl: 60, cacheEverything: true } });
+    if (res.ok) {
+      const json = await res.json();
+      _cfgCache = { at: now, value: json };
+      return json;
+    }
   } catch (e) {}
-  return null;
+  // GitHub lỗi/429 → dùng lại bản đọc được gần nhất thay vì rơi thẳng về hardcode.
+  return _cfgCache.value;
 }
 
 // Domain nguồn, sửa động qua config.json (không cần deploy lại Worker khi đổi domain).
@@ -57,6 +68,8 @@ function decodeEntities(s) {
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
     .replace(/&nbsp;/g, " ")
+    // Tên đội đôi khi bị escape kiểu JS trong HTML nguồn (S\'Amuser)
+    .replace(/\\(['"])/g, "$1")
     .trim();
 }
 
@@ -66,7 +79,7 @@ function absUrl(base, u) {
   return u;
 }
 
-function makeMatch(id, time, home, away, isLive, homeLogo, awayLogo, league, leagueLogo, detailUrl) {
+function makeMatch(id, time, home, away, isLive, homeLogo, awayLogo, league, leagueLogo, detailUrl, startTs) {
   return {
     id: id.toString(),
     time,
@@ -77,6 +90,8 @@ function makeMatch(id, time, home, away, isLive, homeLogo, awayLogo, league, lea
     home_score: "",
     away_score: "",
     is_live: isLive,
+    // Giờ bóng lăn (unix giây, 0 nếu không đọc được) — dùng để lọc "sắp diễn ra"
+    start_ts: startTs || 0,
     league: league || "",
     league_logo: leagueLogo || "",
     detail_url: detailUrl,
@@ -88,11 +103,14 @@ function makeMatch(id, time, home, away, isLive, homeLogo, awayLogo, league, lea
 // enc=true (bản web): mã hoá detail_url + ẩn source để domain nguồn không xuất hiện
 // trong JSON -> tránh phần mềm diệt virus (ESET) quét body và chặn/treo request fetch.
 // App Android gọi không có enc -> nhận detail_url dạng thường như cũ.
-async function handleHome(sourceUrl, noCache, enc) {
+async function handleHome(sourceUrl, noCache, enc, liveOnly) {
   const targetUrl = sourceUrl.replace(/\/$/, "") + "/truc-tiep/";
   const fetchOpts = { headers: { "User-Agent": UA }, redirect: "follow" };
-  // Khi app bấm "Tải lại", ép cào trực tiếp trang nguồn, bỏ qua cache Cloudflare
-  if (noCache) fetchOpts.cf = { cacheTtl: 0, cacheEverything: false };
+  // Khi app bấm "Tải lại", ép cào trực tiếp trang nguồn, bỏ qua cache Cloudflare.
+  // Bình thường cache 30s ở edge: mở/đóng trang liên tục không cào lại trang nguồn 1.1 MB.
+  fetchOpts.cf = noCache
+    ? { cacheTtl: 0, cacheEverything: false }
+    : { cacheTtl: 30, cacheEverything: true };
   const pageRes = await fetch(targetUrl, fetchOpts);
   if (!pageRes.ok) {
     return Response.json({ error: "Không kết nối được web nguồn" }, { status: 500, headers: corsHeaders() });
@@ -104,14 +122,41 @@ async function handleHome(sourceUrl, noCache, enc) {
   //  việc dò chuỗi, tránh nhầm khi trang có class template ẩn.)
   const a = parseListA(html, sourceUrl);
   const b = parseListB(html, sourceUrl);
-  const matches = b.length > a.length ? b : a;
+  const all = b.length > a.length ? b : a;
+
+  // ?filter=live: chỉ trả trận đang đá + sắp đá trong 1 giờ tới.
+  // Trang nguồn không có trang riêng cho trận live (live lẫn sắp đá nằm chung 1 trang),
+  // nên vẫn phải cào từng đó HTML; cái tiết kiệm được là JSON nhỏ đi và nhất là số ảnh
+  // logo mà client kéo qua /proxy (mỗi thẻ trận 3 ảnh = 3 request tới Worker).
+  const matches = liveOnly ? filterLive(all) : all;
 
   if (enc) {
     // Giấu domain nguồn: detail_url -> base64url. Web sẽ gửi lại thẳng qua ?u64=.
     for (const m of matches) m.detail_url = b64urlEncode(m.detail_url);
-    return Response.json({ source: "", total: matches.length, matches }, { headers: corsHeaders() });
+    return Response.json({ source: "", total: matches.length, total_all: all.length, matches }, { headers: corsHeaders() });
   }
-  return Response.json({ source: sourceUrl, total: matches.length, matches }, { headers: corsHeaders() });
+  return Response.json({ source: sourceUrl, total: matches.length, total_all: all.length, matches }, { headers: corsHeaders() });
+}
+
+// Trận "đáng xem ngay": đang đá, hoặc bóng lăn trong 1 giờ tới, hoặc vừa tới giờ
+// nhưng trang nguồn chưa đổi trạng thái (trong 30 phút gần đây). Không đọc được giờ
+// thì giữ lại cho chắc, thà thừa còn hơn mất trận.
+const SOON_AHEAD = 60 * 60;
+const JUST_PASSED = 30 * 60;
+
+function filterLive(list) {
+  const now = Math.floor(Date.now() / 1000);
+  const kept = list.filter((m) => {
+    if (m.is_live) return true;
+    if (!m.start_ts) return true;
+    return m.start_ts <= now + SOON_AHEAD && m.start_ts >= now - JUST_PASSED;
+  });
+  // Đang đá lên trước, sau đó tới trận sắp lăn bóng sớm nhất
+  kept.sort((x, y) => {
+    if (x.is_live !== y.is_live) return x.is_live ? -1 : 1;
+    return (x.start_ts || 0) - (y.start_ts || 0);
+  });
+  return kept;
 }
 
 // --- Template A: class="grid-match", tên đội trong <p> ---
@@ -160,26 +205,34 @@ function parseListA(html, sourceUrl) {
   return matches;
 }
 
-// --- Template B (nguồn hiện tại): grid-match__header, tên đội trong <div class="grid-match__team--name"> ---
+// --- Template B (nguồn hiện tại): grid-matches__item-match, tên đội trong <div class="grid-match__team--name"> ---
 function parseListB(html, sourceUrl) {
   const matches = [];
   const added = new Set();
   let id = 1;
-  const parts = html.split("grid-match__header");
+  // Tách theo wrapper của từng trận: block chứa đủ data-status/data-runtime, link chi tiết,
+  // tên đội, logo. (Thẻ quảng cáo xen giữa lưới chỉ có class grid-matches__item nên tự bị bỏ.)
+  const parts = html.split("grid-matches__item-match");
   for (let i = 1; i < parts.length; i++) {
     const block = parts[i];
 
-    // Link chi tiết: <a href="/truc-tiep/<slug>/"> nằm ở CUỐI phần trước (ngay trước card).
-    // Loại các href .../link/N (là link BLV, không phải trang chi tiết).
-    let url = null;
-    const hrefs = [...parts[i - 1].matchAll(/href="([^"]*\/truc-tiep\/[^"]*)"/g)]
-      .map(m => m[1])
-      .filter(h => !/\/link\//.test(h));
-    if (hrefs.length > 0) url = hrefs[hrefs.length - 1];
+    // Link chi tiết. Loại href .../link/N (là link BLV, không phải trang chi tiết).
+    const hrefM = block.match(/href="([^"]*\/truc-tiep\/[^"]*)"/);
+    const url = hrefM && !/\/link\//.test(hrefM[1]) ? hrefM[1] : null;
 
     const homeM = block.match(/grid-match__team--home-name[^>]*>([^<]+)</);
     const awayM = block.match(/grid-match__team--away-name[^>]*>([^<]+)</);
     if (!url || !homeM || !awayM) continue;
+
+    // Trạng thái trận nằm ở thuộc tính của wrapper:
+    //   data-status: 1 = chưa bắt đầu; 2/4 = hiệp 1/hiệp 2 (bóng đá);
+    //                51/52/53 = set đang đá của môn khác (cầu lông, tennis…)
+    //   data-runtime: giờ bóng lăn, unix giây
+    // (Class cũ grid-match__status--live không còn tồn tại trên trang nguồn.)
+    const statusM = block.match(/data-status="(\d+)"/);
+    const startM = block.match(/data-runtime="(\d+)"/);
+    const status = statusM ? statusM[1] : "";
+    const startTs = startM ? parseInt(startM[1], 10) : 0;
 
     const logoMatches = [...block.matchAll(/<img[^>]*src=["']([^"']+)["'][^>]*class=["'][^"']*team-logo-0[^"']*["'][^>]*>/g)];
     const homeLogo = logoMatches[0] ? logoMatches[0][1] : "";
@@ -198,12 +251,12 @@ function parseListB(html, sourceUrl) {
     const timeM = block.match(/grid-match__date[^>]*>\s*([^<]+?)\s*</);
     const time = timeM ? decodeEntities(timeM[1]) : "";
 
-    const isLive = block.includes('grid-match__status--live') || block.includes('grid-match--is-live') || block.includes('is-living');
+    const isLive = status !== "" && status !== "1";
 
     const detailUrl = absUrl(sourceUrl, url);
     if (added.has(detailUrl)) continue;
     added.add(detailUrl);
-    matches.push(makeMatch(id++, time, decodeEntities(homeM[1]), decodeEntities(awayM[1]), isLive, homeLogo, awayLogo, league, leagueLogo, detailUrl));
+    matches.push(makeMatch(id++, time, decodeEntities(homeM[1]), decodeEntities(awayM[1]), isLive, homeLogo, awayLogo, league, leagueLogo, detailUrl, startTs));
   }
   return matches;
 }
@@ -542,7 +595,10 @@ export default {
         return await handleStream(streamAjaxUrl, baseUrl);
       }
 
-      return await handleHome(baseUrl, noCache, url.searchParams.get("enc") === "1");
+      // ?filter=live → chỉ trận đang đá + sắp đá 1 giờ tới. Không có filter thì trả hết
+      // (APK cũ không biết tham số này nên vẫn nhận đủ danh sách như trước).
+      const liveOnly = url.searchParams.get("filter") === "live";
+      return await handleHome(baseUrl, noCache, url.searchParams.get("enc") === "1", liveOnly);
     } catch (err) {
       return Response.json({ error: err.message }, { status: 500, headers: corsHeaders() });
     }
@@ -581,6 +637,13 @@ const WEB_HTML = `<!doctype html>
     border-bottom:1px solid rgba(0,230,118,.18);
   }
   .logo{font-size:26px; font-weight:900; color:var(--accent); white-space:nowrap}
+  .filterbtn{
+    border:1px solid rgba(255,255,255,.2); background:var(--panel); color:#B9C2D0;
+    border-radius:20px; padding:8px 16px; font-size:14px; cursor:pointer;
+    font-weight:600; transition:.15s; margin-left:16px;
+  }
+  .filterbtn:hover{border-color:var(--accent); transform:translateY(-1px)}
+  .filterbtn.on{background:var(--live); color:#fff; border-color:var(--live)}
   .reload{
     border:1px solid rgba(255,255,255,.2); background:var(--panel); color:#B9C2D0;
     border-radius:20px; padding:8px 16px; font-size:14px; cursor:pointer;
@@ -672,6 +735,7 @@ const WEB_HTML = `<!doctype html>
 <body>
 <header>
   <div class="logo">⚽ XL TV</div>
+  <button class="filterbtn on" id="fbtn">● Đang live</button>
   <div class="count" id="count">0 trận</div>
   <button class="reload" id="reload">🔄 Tải lại</button>
 </header>
@@ -701,6 +765,9 @@ const WEB_HTML = `<!doctype html>
 <script>
 var API = location.origin;
 var hls = null, flv = null;
+// Mặc định chỉ tải trận đang đá + sắp đá 1 giờ tới: danh sách ngắn hơn nên
+// bớt hẳn số logo phải kéo qua /proxy (mỗi thẻ trận 3 ảnh).
+var liveOnly = true;
 
 // Mã hoá base64url để domain nguồn không lộ trong URL -> né bộ lọc web (ESET, ad-block…)
 function b64(s){ return btoa(unescape(encodeURIComponent(s))).replace(/\\+/g,'-').replace(/\\//g,'_').replace(/=+$/,''); }
@@ -728,14 +795,16 @@ function loadMatches(){
   grid.innerHTML = '';
   var reloadBtn = document.getElementById('reload');
   reloadBtn.disabled = true; reloadBtn.textContent = '⏳ Đang tải...';
-  fetch(API + '/?enc=1&t=' + Date.now())
+  fetch(API + '/?enc=1' + (liveOnly ? '&filter=live' : '') + '&t=' + Date.now())
     .then(function(r){ return r.json(); })
     .then(function(data){
       var list = (data && data.matches) || [];
-      countEl.textContent = list.length + ' trận';
+      var totalAll = (data && data.total_all) || list.length;
+      countEl.textContent = liveOnly ? (list.length + '/' + totalAll + ' trận') : (list.length + ' trận');
       renderMatches(list);
       if(list.length) setStatus('', false);
       else if(data && data.error) setStatus('Lỗi nguồn: ' + data.error, true);
+      else if(liveOnly) setStatus('Không có trận nào đang đá hay sắp đá. Bấm "Đang live" để xem tất cả ' + totalAll + ' trận.', false);
       else setStatus('Không có trận nào.', false);
     })
     .catch(function(e){ setStatus('Lỗi kết nối: ' + e.message, true); })
@@ -902,6 +971,13 @@ document.getElementById('fsbtn').onclick = function(){
 };
 
 document.getElementById('reload').onclick = loadMatches;
+document.getElementById('fbtn').onclick = function(){
+  liveOnly = !liveOnly;
+  var b = document.getElementById('fbtn');
+  b.classList.toggle('on', liveOnly);
+  b.textContent = liveOnly ? '● Đang live' : '📋 Tất cả trận';
+  loadMatches();
+};
 document.addEventListener('keydown', function(e){ if(e.key==='Escape' && overlay.classList.contains('show') && !document.fullscreenElement) closeModal(); });
 
 loadMatches();
