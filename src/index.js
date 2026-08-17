@@ -14,7 +14,7 @@
 const DEFAULT_CONFIG_URL = "https://raw.githubusercontent.com/quangthoai1985/XL-TV/main/config.json";
 
 // Domain mặc định của nguồn (dùng khi config.json không đọc được).
-const SOURCE_DEFAULT = "https://xoilaczzyyz.tv";
+const SOURCE_DEFAULT = "https://xoilaczzffz.tv";
 
 // Đọc config.json trên GitHub (luôn lấy bản mới nhất, bỏ qua cache).
 async function getConfig() {
