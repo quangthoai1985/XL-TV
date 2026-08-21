@@ -1,11 +1,12 @@
 {
   "sources": {
-    "xoilacz": "https://xoilaczzrrz.tv/"
+    "xoilacz": "https://nmsba.com/"
   },
-  "source_url": "https://xoilaczzrrz.tv/",
+  "source_url": "https://nmsba.com/",
   "anchor_domains": [
     "xoilacz.io",
     "xoilacz.vip"
   ],
-  "note": "Khi xoilacz doi domain, Worker tu do qua anchor_domains (DNS + HTTP redirect). Neu anchor cung chet, sua source_url + sources.xoilacz. Xem debug: /debug/discovery."
+  "pin_domain": false,
+  "note": "Worker tu bam theo domain moi: moi lan cao no doc response.url xem request dap xuong dau, nen KHONG can sua file nay khi nguon doi ten mien. source_url chi la luoi an toan khi ca 2 anchor cung chet. anchor_domains sua duoc o day (co tac dung that). Dat pin_domain=true de ep dung dung source_url, khong tu chuyen di dau. Kiem tra: /debug/discovery"
 }
