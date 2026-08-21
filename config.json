@@ -1,11 +1,11 @@
 {
   "sources": {
-    "xoilacz": "https://xoilaczzffz.tv"
+    "xoilacz": "https://xoilaczzrrz.tv/"
   },
-  "source_url": "https://xoilaczzffz.tv",
+  "source_url": "https://xoilaczzrrz.tv/",
   "anchor_domains": [
     "xoilacz.io",
     "xoilacz.vip"
   ],
-  "note": "Khi xoilacz doi domain, Worker tu do qua anchor_domains (DNS + HTTP redirect). Neu anchor cung chet, sua source_url + sources.xoilacz de tro thang domain moi. Xem debug: /debug/discovery."
+  "note": "Khi xoilacz doi domain, Worker tu do qua anchor_domains (DNS + HTTP redirect). Neu anchor cung chet, sua source_url + sources.xoilacz. Xem debug: /debug/discovery."
 }
