@@ -9,6 +9,9 @@
  *   GET /            → Danh sách trận đấu
  *   GET /detail?url= → Chi tiết trận: BLV + link stream
  *   GET /stream?url= → Lấy URL stream thật
+ *
+ * Domain Discovery: tự động dò domain mới khi nguồn đổi tên miền, dùng 2 anchor
+ * domain (xoilacz.io, xoilacz.vip) + DNS-over-HTTPS + HTTP redirect:manual.
  */
 
 const DEFAULT_CONFIG_URL = "https://raw.githubusercontent.com/quangthoai1985/XL-TV/main/config.json";
@@ -45,6 +48,190 @@ function resolveBase(config) {
     if (config.sources && config.sources.xoilacz) return config.sources.xoilacz;
     if (config.source_url) return config.source_url;
   }
+  return SOURCE_DEFAULT;
+}
+
+// ====== DOMAIN DISCOVERY ======
+// Khi nguồn đổi tên miền, thay vì phải cập nhật thủ công config.json, Worker tự động
+// dò domain mới từ các "anchor domain" cố định mà trang nguồn dùng để redirect.
+//
+// Chiến lược 3 tầng, mỗi tầng fallback xuống tầng dưới:
+//   Layer 1: HTTP redirect:manual → đọc Location header (301/302)
+//   Layer 2: DNS CNAME lookup qua Cloudflare DNS-over-HTTPS
+//   Layer 3: DNS A record → so sánh IP với domain hiện tại để phát hiện cùng backend
+//
+// Anchor domains: các domain "cố định" mà trang nguồn dùng để redirect người dùng
+// đến domain mới. Khi 1 anchor không kết nối được, thử anchor tiếp theo.
+// Kết quả resolve được cache 15 phút để tránh thêm subrequest mỗi lần gọi API.
+
+const ANCHOR_DOMAINS = [
+  "xoilacz.io",
+  "xoilacz.vip"
+];
+
+// Cache kết quả domain discovery.
+let _discoveryCache = { at: 0, domain: null, source: null, triedAt: 0 };
+
+// Mỗi lần discovery tiêu tốn ít nhất 2 subrequest (DNS + HTTP) cho mỗi anchor.
+// 15 phút là đủ để bắt kịp khi nguồn đổi domain mà không làm cạn subrequest budget.
+const DISCOVERY_TTL_MS = 15 * 60 * 1000;
+
+// Khoảng cách tối thiểu giữa 2 lần thử discovery (kể cả khi thất bại) — tránh spam
+// DNS/HTTP khi anchor domain đang chết hoàn toàn.
+const DISCOVERY_COOLDOWN_MS = 5 * 60 * 1000;
+
+/**
+ * Try to discover the active domain from anchor domains.
+ * Returns: { domain: "https://...", source: "anchor|dns|config" } or null.
+ */
+async function discoverDomain(currentConfigDomain) {
+  const now = Date.now();
+
+  // Dùng kết quả đã cache nếu còn valid.
+  if (_discoveryCache.domain && now - _discoveryCache.at < DISCOVERY_TTL_MS) {
+    return { domain: _discoveryCache.domain, source: _discoveryCache.source };
+  }
+
+  // Nếu vừa thử thất bại gần đây, không thử lại ngay.
+  if (now - _discoveryCache.triedAt < DISCOVERY_COOLDOWN_MS) {
+    return null;
+  }
+
+  _discoveryCache.triedAt = now;
+
+  for (const anchor of ANCHOR_DOMAINS) {
+    // ---- Layer 1: HTTP redirect ----
+    try {
+      const httpRes = await fetch(`https://${anchor}/`, {
+        headers: { "User-Agent": UA },
+        redirect: "manual",
+        signal: AbortSignal.timeout(8000)
+      });
+
+      // 301/302/303/307/308 → có Location header
+      const location = httpRes.headers.get("Location");
+      if (location && [301, 302, 303, 307, 308].includes(httpRes.status)) {
+        let newUrl;
+        try { newUrl = new URL(location); } catch (e) { continue; }
+
+        const newDomain = newUrl.origin;
+        // Chỉ chấp nhận nếu redirect đến 1 domain KHÁC anchor (không loop)
+        if (newDomain !== `https://${anchor}` && !ANCHOR_DOMAINS.some(a => newDomain === `https://${a}`)) {
+          // Verify: gọi thử 1 request đến domain mới xem có sống không
+          const testUrl = `${newDomain}/truc-tiep/`;
+          const testRes = await fetch(testUrl, {
+            headers: { "User-Agent": UA },
+            signal: AbortSignal.timeout(10000)
+          });
+          if (testRes.ok) {
+            _discoveryCache = { at: now, domain: newDomain, source: `http-redirect:${anchor}`, triedAt: now };
+            console.log(`[discovery] Layer 1 SUCCESS: ${anchor} → ${newDomain}`);
+            return { domain: newDomain, source: `http-redirect:${anchor}` };
+          }
+        }
+      }
+    } catch (e) {
+      // HTTP redirect fail → fall through to Layer 2
+    }
+
+    // ---- Layer 2: DNS CNAME lookup qua Cloudflare DoH ----
+    try {
+      const dohUrl = `https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(anchor)}&type=CNAME`;
+      const dohRes = await fetch(dohUrl, {
+        headers: { "Accept": "application/dns-json" },
+        signal: AbortSignal.timeout(5000)
+      });
+      if (dohRes.ok) {
+        const dohData = await dohRes.json();
+        if (dohData.Answer) {
+          for (const ans of dohData.Answer) {
+            if (ans.type === 5 && ans.data) {
+              // CNAME data: "domain.tld." (có dấu chấm cuối)
+              const cnameTarget = ans.data.replace(/\.$/, "");
+              // Không lấy chính anchor (loop) và không lấy các anchor khác
+              if (cnameTarget !== anchor && !ANCHOR_DOMAINS.includes(cnameTarget)) {
+                const candidate = `https://${cnameTarget}`;
+                // Verify CNAME target
+                try {
+                  const testUrl = `${candidate}/truc-tiep/`;
+                  const testRes = await fetch(testUrl, {
+                    headers: { "User-Agent": UA },
+                    signal: AbortSignal.timeout(10000)
+                  });
+                  if (testRes.ok) {
+                    _discoveryCache = { at: now, domain: candidate, source: `dns-cname:${anchor}`, triedAt: now };
+                    console.log(`[discovery] Layer 2 SUCCESS: ${anchor} CNAME → ${candidate}`);
+                    return { domain: candidate, source: `dns-cname:${anchor}` };
+                  }
+                } catch (v) {}
+              }
+            }
+          }
+        }
+      }
+    } catch (e) {
+      // DNS fail → fall through to Layer 3
+    }
+
+    // ---- Layer 3: A record comparison ----
+    // Lấy IP của anchor + IP của domain hiện tại; nếu trùng → có thể cùng backend.
+    // Layer này KHÔNG trả về domain mới, chỉ ghi log để hỗ trợ debug.
+    try {
+      const dohUrlA = `https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(anchor)}&type=A`;
+      const dohResA = await fetch(dohUrlA, {
+        headers: { "Accept": "application/dns-json" },
+        signal: AbortSignal.timeout(5000)
+      });
+      if (dohResA.ok) {
+        const dohDataA = await dohResA.json();
+        const anchorIPs = (dohDataA.Answer || []).filter(a => a.type === 1).map(a => a.data).sort().join(",");
+
+        if (anchorIPs && currentConfigDomain) {
+          let currentHost;
+          try { currentHost = new URL(currentConfigDomain).hostname; } catch (e) {}
+          if (currentHost) {
+            const dohCur = await fetch(
+              `https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(currentHost)}&type=A`,
+              { headers: { "Accept": "application/dns-json" }, signal: AbortSignal.timeout(5000) }
+            );
+            if (dohCur.ok) {
+              const curData = await dohCur.json();
+              const curIPs = (curData.Answer || []).filter(a => a.type === 1).map(a => a.data).sort().join(",");
+              if (anchorIPs === curIPs && anchorIPs) {
+                console.log(`[discovery] Layer 3 NOTE: ${anchor} shares IPs (${anchorIPs}) with current domain — likely same backend`);
+              }
+            }
+          }
+        }
+      }
+    } catch (e) {}
+  }
+
+  // Tất cả layer thất bại → cache null (trong cooldown)
+  _discoveryCache = { at: now, domain: null, source: null, triedAt: now };
+  console.log("[discovery] All layers failed for all anchors");
+  return null;
+}
+
+/**
+ * Resolve active source URL: discovery → config.json → hardcoded default.
+ */
+async function resolveActiveDomain(config) {
+  // 1. Thử domain discovery từ anchor domains
+  const discovered = await discoverDomain(
+    (config && config.source_url) || (config && config.sources && config.sources.xoilacz)
+  );
+  if (discovered) {
+    return discovered.domain;
+  }
+
+  // 2. Fallback: dùng domain trong config.json
+  if (config) {
+    if (config.sources && config.sources.xoilacz) return config.sources.xoilacz;
+    if (config.source_url) return config.source_url;
+  }
+
+  // 3. Hardcoded default
   return SOURCE_DEFAULT;
 }
 
@@ -571,9 +758,10 @@ export default {
       }
     }
 
-    // Chỉ còn 1 nguồn; ?src= (nếu app cũ còn gửi) bị bỏ qua. Domain đọc từ config.json.
+    // Chỉ còn 1 nguồn; ?src= (nếu app cũ còn gửi) bị bỏ qua.
+    // Domain được resolve theo thứ tự: domain discovery (anchor) → config.json → hardcoded default.
     const config = await getConfig();
-    const baseUrl = resolveBase(config);
+    const baseUrl = await resolveActiveDomain(config);
     // App gửi kèm ?t=<timestamp> mỗi lần tải/Tải lại → luôn lấy dữ liệu mới
     const noCache = url.searchParams.has("t") || url.searchParams.has("refresh");
 
@@ -598,6 +786,27 @@ export default {
       // ?filter=live → chỉ trận đang đá + sắp đá 1 giờ tới. Không có filter thì trả hết
       // (APK cũ không biết tham số này nên vẫn nhận đủ danh sách như trước).
       const liveOnly = url.searchParams.get("filter") === "live";
+
+      // ---- Endpoint debug: xem trạng thái domain discovery ----
+      if (url.pathname === "/debug/discovery") {
+        const d = {
+          current_domain: baseUrl,
+          discovery_cache: {
+            domain: _discoveryCache.domain,
+            source: _discoveryCache.source,
+            age_ms: _discoveryCache.at ? Date.now() - _discoveryCache.at : 0,
+            last_tried_ms_ago: _discoveryCache.triedAt ? Date.now() - _discoveryCache.triedAt : 0
+          },
+          anchor_domains: ANCHOR_DOMAINS,
+          hardcoded_default: SOURCE_DEFAULT,
+          config: config ? {
+            source_url: config.source_url,
+            xoilacz: config.sources && config.sources.xoilacz
+          } : null
+        };
+        return Response.json(d, { headers: corsHeaders() });
+      }
+
       return await handleHome(baseUrl, noCache, url.searchParams.get("enc") === "1", liveOnly);
     } catch (err) {
       return Response.json({ error: err.message }, { status: 500, headers: corsHeaders() });
