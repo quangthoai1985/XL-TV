@@ -6,24 +6,32 @@
 //   { dead: true }                     → fetch ném lỗi (domain chết hẳn / timeout)
 
 // Một khối trận theo template B của nguồn (grid-matches__item-match).
-function matchBlock(i, home, away) {
+// Dựng đúng như nguồn thật: class nhiều tên (grid-match grid-match-football …) và
+// có data-sport — nguồn trộn chung bóng đá với esports, tennis, bóng rổ.
+function matchBlock(i, home, away, sport, status) {
   return `
-<div class="grid-matches__item grid-matches__item-match" data-status="1" data-runtime="${1755800000 + i * 3600}">
-  <div class="grid-match__league"><img src="/l.png"><span class="text-ellipsis">Giải Test</span></div>
-  <div class="grid-match__date"><span>20:00 22/08</span></div>
-  <a href="/truc-tiep/tran-${i}/">
+<div class="grid-matches__item grid-matches__item-match match-football-item"
+     data-status="${status}" data-runtime="${1755800000 + i * 3600}" data-sport="${sport}">
+  <a href="/truc-tiep/tran-${i}/" class="redirectPopup" data-random-streams=",link/1/"></a>
+  <div class="grid-match grid-match-${sport}  grid-match--is-hot ">
+    <div class="grid-match__league"><img src="/l.png"><span class="text-ellipsis">Giải Test</span></div>
+    <div class="grid-match__date"><span>20:00 22/08</span></div>
     <div class="grid-match__team--home-name">${home}</div>
     <img src="/h${i}.png" class="team-logo-0">
     <div class="grid-match__team--away-name">${away}</div>
     <img src="/a${i}.png" class="team-logo-0">
-  </a>
+  </div>
 </div>`;
 }
 
 // Trang danh sách trận thật sự (có lưới). label để phân biệt nội dung cũ / mới.
-export function sourceHtml(n = 3, label = "") {
+// sports: danh sách môn gán lần lượt cho từng trận (mặc định tất cả là bóng đá).
+export function sourceHtml(n = 3, label = "", sports = null) {
   const blocks = [];
-  for (let i = 1; i <= n; i++) blocks.push(matchBlock(i, `${label}Home${i}`, `${label}Away${i}`));
+  for (let i = 1; i <= n; i++) {
+    const sport = sports ? sports[(i - 1) % sports.length] : "football";
+    blocks.push(matchBlock(i, `${label}Home${i}`, `${label}Away${i}`, sport, "1"));
+  }
   return `<!doctype html><html><body><div class="grid-matches">${blocks.join("")}</div></body></html>`;
 }
 

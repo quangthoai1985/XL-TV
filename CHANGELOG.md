@@ -4,6 +4,42 @@
 
 ---
 
+## [1.5.0] - 2026-08-22
+
+Trận Man United và Việt Nam **có trong dữ liệu nhưng không nhìn thấy trên màn hình**. Không phải lỗi cào, không phải lỗi domain — lỗi ở chỗ nguồn trộn mọi môn vào một lưới.
+
+### Dữ kiện
+
+Ảnh chụp giao diện lúc 18:57 ngày 22/08: bộ đếm hiện `35/88 trận`, ba thẻ đầu là **Dota 2, tennis, LMHT**. Danh sách live sắp theo giờ bóng lăn tăng dần, nên các trận esports/tennis khai cuộc từ chiều đứng trên cùng; Man United 18:30 và Việt Nam 20:00 bị đẩy xuống tận đáy.
+
+Trong khi đó HTML nguồn có sẵn thuộc tính `data-sport="football"` trên từng khối trận — **parser chưa bao giờ đọc nó**.
+
+### Added: trường `sport` cho mỗi trận
+
+`parseListB` đọc `data-sport` (football, esports, tennis, basketball…). Đây là thứ duy nhất tách được trận bóng đá ra khỏi lưới trộn.
+
+### Added: `?sport=` cho `/`
+
+`GET /?sport=football` chỉ trả bóng đá. Lọc **trước** bộ lọc `filter=live` nên hai bộ lọc không cắt nhầm nhau. Không truyền tham số thì trả mọi môn như cũ — **APK cũ không đổi hành vi.**
+
+### Added: `sports` và `total_parsed` trong JSON
+
+`sports` đếm số trận từng môn, tính trên toàn danh sách **trước khi lọc**, để giao diện dựng nút chọn môn kèm số lượng mà không phải tải lại.
+
+### Changed: giao diện web mặc định lọc bóng đá
+
+Thêm nút `⚽ Bóng đá` / `🏆 Mọi môn` cạnh nút lọc live, bật sẵn. Đây là app bóng đá ("XL TV — Trực tiếp bóng đá") nên để mặc định hiện cả esports là sai chủ đích.
+
+### Kiểm thử
+
+Thêm 7 test cho bộ lọc môn. HTML giả lập được dựng lại cho giống nguồn thật: class nhiều tên (`grid-match grid-match-football grid-match--is-hot`) và có `data-sport`. **21/21 PASS.**
+
+### Ghi nhận: parser A đã chết trên thực tế
+
+`/debug/parse` cho `class="grid-match"` = **0**, `parser_a` = **0**. Nguồn viết class nhiều tên nên chuỗi có dấu nháy đóng ngay sau không còn tồn tại. Parser A mang tiếng "dự phòng nếu nguồn đổi giao diện" nhưng không bao giờ khớp được nữa — lưới an toàn chỉ còn trên danh nghĩa. Chưa sửa vì B đang chạy tốt và sửa mò thì rủi ro hơn là để yên.
+
+---
+
 ## [1.4.0] - 2026-08-22
 
 ### Đo được: cơ chế bám domain ĐÃ CHẠY ĐÚNG
