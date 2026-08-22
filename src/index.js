@@ -15,7 +15,7 @@
 
 // Đổi mỗi khi cơ chế resolve/parse thay đổi. Gọi /debug/* mà thấy số cũ tức là
 // Cloudflare chưa deploy bản mới — đã từng xảy ra âm thầm với repo này.
-const WORKER_VERSION = "1.4.0";
+const WORKER_VERSION = "1.5.0";
 
 const DEFAULT_CONFIG_URL = "https://raw.githubusercontent.com/quangthoai1985/XL-TV/main/config.json";
 
@@ -275,7 +275,7 @@ function absUrl(base, u) {
   return u;
 }
 
-function makeMatch(id, time, home, away, isLive, homeLogo, awayLogo, league, leagueLogo, detailUrl, startTs) {
+function makeMatch(id, time, home, away, isLive, homeLogo, awayLogo, league, leagueLogo, detailUrl, startTs, sport) {
   return {
     id: id.toString(),
     time,
@@ -290,6 +290,10 @@ function makeMatch(id, time, home, away, isLive, homeLogo, awayLogo, league, lea
     start_ts: startTs || 0,
     league: league || "",
     league_logo: leagueLogo || "",
+    // Môn thi đấu, lấy từ data-sport của nguồn: football, esports, tennis, basketball…
+    // Nguồn trộn chung mọi môn vào một lưới, nên không có trường này thì trận bóng đá
+    // bị chôn dưới hàng chục trận esports/tennis (xem SPORT_DEFAULT).
+    sport: sport || "",
     detail_url: detailUrl,
     stream_url: ""
   };
@@ -299,7 +303,7 @@ function makeMatch(id, time, home, away, isLive, homeLogo, awayLogo, league, lea
 // enc=true (bản web): mã hoá detail_url + ẩn source để domain nguồn không xuất hiện
 // trong JSON -> tránh phần mềm diệt virus (ESET) quét body và chặn/treo request fetch.
 // App Android gọi không có enc -> nhận detail_url dạng thường như cũ.
-async function handleHome(config, noCache, enc, liveOnly) {
+async function handleHome(config, noCache, enc, liveOnly, sport) {
   // Tải trang và xác định domain đang sống trong CÙNG một request.
   const page = await fetchSourceWithFallback(config, noCache);
   if (!page) {
@@ -313,7 +317,13 @@ async function handleHome(config, noCache, enc, liveOnly) {
   //  việc dò chuỗi, tránh nhầm khi trang có class template ẩn.)
   const a = parseListA(html, sourceUrl);
   const b = parseListB(html, sourceUrl);
-  const all = b.length > a.length ? b : a;
+  const parsed = b.length > a.length ? b : a;
+
+  // ?sport=football → chỉ bóng đá. Nguồn trộn chung esports, tennis, bóng rổ… vào một
+  // lưới; riêng ngày 22/08/2026 có 88 trận thì phần lớn KHÔNG phải bóng đá, nên trận
+  // bóng đá bị đẩy xuống tận đáy danh sách. Không truyền tham số thì trả hết như cũ
+  // (APK cũ không biết tham số này vẫn chạy y nguyên).
+  const all = sport ? parsed.filter((m) => m.sport === sport) : parsed;
 
   // ?filter=live: chỉ trả trận đang đá + sắp đá trong 1 giờ tới.
   // Trang nguồn không có trang riêng cho trận live (live lẫn sắp đá nằm chung 1 trang),
@@ -321,12 +331,18 @@ async function handleHome(config, noCache, enc, liveOnly) {
   // logo mà client kéo qua /proxy (mỗi thẻ trận 3 ảnh = 3 request tới Worker).
   const matches = liveOnly ? filterLive(all) : all;
 
+  // Số trận theo từng môn, đếm trên toàn bộ danh sách trước khi lọc — để giao diện
+  // dựng được các nút chọn môn kèm số lượng mà không phải tải lại.
+  const sports = {};
+  for (const m of parsed) { const k = m.sport || "khac"; sports[k] = (sports[k] || 0) + 1; }
+
+  const body = { total: matches.length, total_all: all.length, total_parsed: parsed.length, sports, matches };
   if (enc) {
     // Giấu domain nguồn: detail_url -> base64url. Web sẽ gửi lại thẳng qua ?u64=.
     for (const m of matches) m.detail_url = b64urlEncode(m.detail_url);
-    return Response.json({ source: "", total: matches.length, total_all: all.length, matches }, { headers: corsHeaders() });
+    return Response.json({ source: "", ...body }, { headers: corsHeaders() });
   }
-  return Response.json({ source: sourceUrl, total: matches.length, total_all: all.length, matches }, { headers: corsHeaders() });
+  return Response.json({ source: sourceUrl, ...body }, { headers: corsHeaders() });
 }
 
 // Trận "đáng xem ngay": đang đá, hoặc bóng lăn trong 1 giờ tới, hoặc vừa tới giờ
@@ -425,6 +441,11 @@ function parseListB(html, sourceUrl) {
     const status = statusM ? statusM[1] : "";
     const startTs = startM ? parseInt(startM[1], 10) : 0;
 
+    // data-sport: môn thi đấu (football, esports, tennis, basketball…). Nguồn trộn
+    // chung mọi môn vào một lưới nên đây là thứ duy nhất tách được trận bóng đá ra.
+    const sportM = block.match(/data-sport="([a-z0-9_-]+)"/i);
+    const sport = sportM ? sportM[1].toLowerCase() : "";
+
     const logoMatches = [...block.matchAll(/<img[^>]*src=["']([^"']+)["'][^>]*class=["'][^"']*team-logo-0[^"']*["'][^>]*>/g)];
     const homeLogo = logoMatches[0] ? logoMatches[0][1] : "";
     const awayLogo = logoMatches[1] ? logoMatches[1][1] : "";
@@ -447,7 +468,7 @@ function parseListB(html, sourceUrl) {
     const detailUrl = absUrl(sourceUrl, url);
     if (added.has(detailUrl)) continue;
     added.add(detailUrl);
-    matches.push(makeMatch(id++, time, decodeEntities(homeM[1]), decodeEntities(awayM[1]), isLive, homeLogo, awayLogo, league, leagueLogo, detailUrl, startTs));
+    matches.push(makeMatch(id++, time, decodeEntities(homeM[1]), decodeEntities(awayM[1]), isLive, homeLogo, awayLogo, league, leagueLogo, detailUrl, startTs, sport));
   }
   return matches;
 }
@@ -884,7 +905,9 @@ export default {
       // ?filter=live → chỉ trận đang đá + sắp đá 1 giờ tới. Không có filter thì trả hết
       // (APK cũ không biết tham số này nên vẫn nhận đủ danh sách như trước).
       const liveOnly = url.searchParams.get("filter") === "live";
-      return await handleHome(config, noCache, url.searchParams.get("enc") === "1", liveOnly);
+      // ?sport=football → chỉ bóng đá. Không truyền thì trả mọi môn như cũ.
+      const sport = (url.searchParams.get("sport") || "").toLowerCase();
+      return await handleHome(config, noCache, url.searchParams.get("enc") === "1", liveOnly, sport);
     } catch (err) {
       return Response.json({ error: err.message }, { status: 500, headers: corsHeaders() });
     }
@@ -930,6 +953,9 @@ const WEB_HTML = `<!doctype html>
   }
   .filterbtn:hover{border-color:var(--accent); transform:translateY(-1px)}
   .filterbtn.on{background:var(--live); color:#fff; border-color:var(--live)}
+  /* Nút chọn môn bật thì dùng màu accent, để phân biệt với nút lọc live màu đỏ. */
+  #sbtn{margin-left:8px}
+  #sbtn.on{background:var(--accent); color:#06210F; border-color:var(--accent)}
   .reload{
     border:1px solid rgba(255,255,255,.2); background:var(--panel); color:#B9C2D0;
     border-radius:20px; padding:8px 16px; font-size:14px; cursor:pointer;
@@ -1022,6 +1048,7 @@ const WEB_HTML = `<!doctype html>
 <header>
   <div class="logo">⚽ XL TV</div>
   <button class="filterbtn on" id="fbtn">● Đang live</button>
+  <button class="filterbtn on" id="sbtn">⚽ Bóng đá</button>
   <div class="count" id="count">0 trận</div>
   <button class="reload" id="reload">🔄 Tải lại</button>
 </header>
@@ -1054,6 +1081,10 @@ var hls = null, flv = null;
 // Mặc định chỉ tải trận đang đá + sắp đá 1 giờ tới: danh sách ngắn hơn nên
 // bớt hẳn số logo phải kéo qua /proxy (mỗi thẻ trận 3 ảnh).
 var liveOnly = true;
+// Nguồn trộn chung bóng đá với esports, tennis, bóng rổ… vào một lưới, và phần lớn
+// KHÔNG phải bóng đá. Đây là app bóng đá nên mặc định lọc sẵn, nếu không trận bóng đá
+// bị chôn dưới hàng chục trận môn khác.
+var footballOnly = true;
 
 // Mã hoá base64url để domain nguồn không lộ trong URL -> né bộ lọc web (ESET, ad-block…)
 function b64(s){ return btoa(unescape(encodeURIComponent(s))).replace(/\\+/g,'-').replace(/\\//g,'_').replace(/=+$/,''); }
@@ -1081,7 +1112,7 @@ function loadMatches(){
   grid.innerHTML = '';
   var reloadBtn = document.getElementById('reload');
   reloadBtn.disabled = true; reloadBtn.textContent = '⏳ Đang tải...';
-  fetch(API + '/?enc=1' + (liveOnly ? '&filter=live' : '') + '&t=' + Date.now())
+  fetch(API + '/?enc=1' + (liveOnly ? '&filter=live' : '') + (footballOnly ? '&sport=football' : '') + '&t=' + Date.now())
     .then(function(r){ return r.json(); })
     .then(function(data){
       var list = (data && data.matches) || [];
@@ -1090,6 +1121,7 @@ function loadMatches(){
       renderMatches(list);
       if(list.length) setStatus('', false);
       else if(data && data.error) setStatus('Lỗi nguồn: ' + data.error, true);
+      else if(liveOnly && footballOnly) setStatus('Không có trận bóng đá nào đang đá hay sắp đá. Bấm "Đang live" để xem cả ' + totalAll + ' trận bóng đá hôm nay, hoặc bấm "Bóng đá" để xem thêm môn khác.', false);
       else if(liveOnly) setStatus('Không có trận nào đang đá hay sắp đá. Bấm "Đang live" để xem tất cả ' + totalAll + ' trận.', false);
       else setStatus('Không có trận nào.', false);
     })
@@ -1262,6 +1294,13 @@ document.getElementById('fbtn').onclick = function(){
   var b = document.getElementById('fbtn');
   b.classList.toggle('on', liveOnly);
   b.textContent = liveOnly ? '● Đang live' : '📋 Tất cả trận';
+  loadMatches();
+};
+document.getElementById('sbtn').onclick = function(){
+  footballOnly = !footballOnly;
+  var b = document.getElementById('sbtn');
+  b.classList.toggle('on', footballOnly);
+  b.textContent = footballOnly ? '⚽ Bóng đá' : '🏆 Mọi môn';
   loadMatches();
 };
 document.addEventListener('keydown', function(e){ if(e.key==='Escape' && overlay.classList.contains('show') && !document.fullscreenElement) closeModal(); });
