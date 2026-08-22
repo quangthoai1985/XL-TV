@@ -4,6 +4,66 @@
 
 ---
 
+## [1.4.0] - 2026-08-22
+
+### Đo được: cơ chế bám domain ĐÃ CHẠY ĐÚNG
+
+Kết quả `/debug/discovery?probe=1` trên Worker thật:
+
+```
+worker_version : 1.3.1                    → bản mới đã deploy
+current_domain : https://xoilaczziiz.tv   → domain mới, tự tìm ra
+resolved_from  : anchor
+trace          : xoilacz.io/ → 200 → đáp xuống xoilaczziiz.tv → có lưới trận, 1.443.284 bytes
+```
+
+Đúng **một** ứng viên, **một** request, trúng ngay. Anchor vẫn được chủ site duy trì, và bản 1.3.0 bắt kịp domain mới như thiết kế. Vậy nguyên nhân "trận đấu không cập nhật" **không nằm ở khâu tìm domain** — nó nằm ở khâu sau: bóc tách HTML.
+
+### Changed: `config.json` → `xoilaczziiz.tv`
+
+`nmsba.com` đã cũ. Giá trị này không ảnh hưởng đường chính (anchor lo việc đó), nhưng nó là lưới an toàn khi cả 2 anchor cùng chết, **và** là `Referer` mà `/stream` dùng khi tiến trình vừa khởi động chưa kịp resolve — để sai thì phát video có thể hỏng.
+
+### Added: `/debug/parse`
+
+Cào trang thật rồi đếm từng dấu hiệu mà parser dựa vào — selector nào về `0` là selector đó đã bị đổi tên trên bố cục mới:
+
+- `parser_a` / `parser_b`: mỗi parser ra bao nhiêu trận
+- `b_so_khoi`: tách được bao nhiêu khối trận
+- `b_bo_qua`: bao nhiêu khối bị loại vì thiếu href, bao nhiêu vì thiếu tên đội
+- `dau_hieu`: số lần xuất hiện của `grid-matches__item-match`, `grid-match__team--home-name`, `data-status`, `data-runtime`, `team-logo-0`, `/truc-tiep/`…
+- `vi_du_tran`: 2 trận đầu bóc được
+- `mau_html`: một khối trận thật, cắt 1200 ký tự — thứ cho biết bố cục mới trông ra sao
+
+### Changed: `WORKER_VERSION` thành hằng số dùng chung
+
+Trước rải rác chuỗi cứng trong từng endpoint. Nay một chỗ, mọi endpoint debug cùng khai.
+
+---
+
+## [1.3.1] - 2026-08-22
+
+Bản 1.3.0 đã lên `main` nhưng trận đấu **vẫn chưa cập nhật**. Không quan sát được hệ thống chạy thật thì mọi phán đoán tiếp theo đều là đoán mò, nên bản này bổ sung đúng phần quan sát còn thiếu.
+
+### Added: `worker_version` trong `/debug/discovery`
+
+Repo này deploy qua Cloudflare Workers Builds, và đã từng **hỏng âm thầm** (xem commit `99c5fb5` "Trigger redeploy after GitHub webhook outage"). Gọi debug mà thấy version cũ — hoặc không thấy trường này — nghĩa là code mới chưa hề chạy, và mọi việc sửa code đều vô nghĩa cho tới khi deploy lại.
+
+### Added: `trace` trong `/debug/discovery?probe=1`
+
+Nhật ký từng ứng viên và từng đường dẫn đã thử, đúng thứ tự, mỗi dòng ghi: URL đã gọi, HTTP status, **domain mà request thực sự đáp xuống**, có lưới trận hay không, kích thước HTML. Anchor chết thì ghi thẳng thông báo lỗi.
+
+Một lần gọi là dựng lại được toàn bộ đường đi và chỉ ra chính xác mắt xích hỏng — cụ thể là phân biệt được ba khả năng còn lại:
+
+1. **Anchor không còn trỏ về domain sống** → toàn bộ thiết kế "bám theo biển chỉ đường" mất chỗ dựa, phải đổi hướng.
+2. **Domain cũ đóng băng vẫn trả lưới trận** → `looksLikeSource()` nhận nhầm, cần thêm dấu hiệu nhận biết dữ liệu cũ.
+3. **Nguồn đổi bố cục HTML** → `looksLikeSource()` trượt ở mọi nơi, phải cập nhật parser.
+
+### Kiểm thử
+
+Thêm 2 test cho trace (khai đúng nơi đáp xuống, không tự đi cào khi không có `?probe=1`). **14/14 PASS.**
+
+---
+
 ## [1.3.0] - 2026-08-22
 
 Nguồn đổi tên miền, hệ thống **không bắt kịp** — danh sách trận đứng yên ở dữ liệu cũ. Bản 1.2.0 hứa "tự bám domain" nhưng có ba lỗ hổng, sửa cả ba ở đây.

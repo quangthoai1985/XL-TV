@@ -13,6 +13,10 @@
  *   GET /debug/discovery  → Domain đang dùng (?probe=1 để ép dò lại)
  */
 
+// Đổi mỗi khi cơ chế resolve/parse thay đổi. Gọi /debug/* mà thấy số cũ tức là
+// Cloudflare chưa deploy bản mới — đã từng xảy ra âm thầm với repo này.
+const WORKER_VERSION = "1.4.0";
+
 const DEFAULT_CONFIG_URL = "https://raw.githubusercontent.com/quangthoai1985/XL-TV/main/config.json";
 
 // Domain mặc định của nguồn (chỉ dùng khi mọi cách khác đều thất bại).
@@ -166,11 +170,18 @@ async function fetchSourcePage(base, path, noCache) {
 
 // Thử lần lượt các đường dẫn trên một domain, dừng ở cái đầu tiên có lưới trận.
 // Không có cái nào đạt thì trả về lần thử "khá nhất" để caller còn đọc được origin.
-async function probeCandidate(base, noCache) {
+async function probeCandidate(base, noCache, trace) {
   let best = null;
   for (const path of SOURCE_PATHS) {
-    let r = null;
-    try { r = await fetchSourcePage(base, path, noCache); } catch (e) { r = null; }
+    let r = null, err = null;
+    try { r = await fetchSourcePage(base, path, noCache); } catch (e) { err = e.message || String(e); }
+    // trace: nhật ký từng lần thử, chỉ bật khi gọi /debug/discovery?probe=1. Có nó thì
+    // một lần gọi debug là đủ dựng lại toàn bộ đường đi, không phải ngồi đoán.
+    if (trace) {
+      trace.push(err
+        ? { thu: base + path, loi: err }
+        : { thu: base + path, status: r.status, dap_xuong: r.origin, co_luoi_tran: r.ok, bytes: r.html.length });
+    }
     if (!r) continue;
     if (r.ok) return r;
     // Ưu tiên giữ lần thử trả 200 (trang đọc được) hơn lần trả lỗi.
@@ -181,11 +192,11 @@ async function probeCandidate(base, noCache) {
 
 // Thử lần lượt: domain đang nhớ → anchor → config.json → hardcode.
 // Dừng ngay ở ứng viên đầu tiên trả về đúng trang có lưới trận.
-async function fetchSourceWithFallback(config, noCache) {
+async function fetchSourceWithFallback(config, noCache, trace) {
   // pin_domain: true trong config.json = phanh tay. Ép dùng đúng domain trong config,
   // không tự chuyển đi đâu hết. Dùng khi cần can thiệp khẩn cấp.
   if (config && config.pin_domain === true) {
-    const r = await probeCandidate(configDomain(config) || SOURCE_DEFAULT, noCache);
+    const r = await probeCandidate(configDomain(config) || SOURCE_DEFAULT, noCache, trace);
     if (r) rememberDomain(r.origin, "pin");
     return r;
   }
@@ -211,7 +222,8 @@ async function fetchSourceWithFallback(config, noCache) {
   // Duyệt bằng chỉ số vì hàng đợi có thể dài thêm ngay trong lúc chạy (xem "manh mối").
   for (let i = 0; i < candidates.length && i < MAX_CANDIDATES; i++) {
     const c = candidates[i];
-    const r = await probeCandidate(c.url, noCache);
+    if (trace) trace.push({ ung_vien: c.url, vai_tro: c.from });
+    const r = await probeCandidate(c.url, noCache, trace);
     if (!r) continue;
     if (r.ok) { rememberDomain(r.origin, c.from); return r; }
     // Manh mối: request đáp xuống một domain khác domain đã gọi → nguồn đã dời nhà,
@@ -775,17 +787,74 @@ export default {
         return await handleStream(streamAjaxUrl, cheapDomain(await getConfig()));
       }
 
+      // ---- Endpoint debug: vì sao parser không ra trận. ----
+      // Cào trang thật rồi đếm từng dấu hiệu mà parser dựa vào. Selector nào về 0 tức
+      // là chỗ đó chết trên bố cục mới — không phải đoán.
+      if (url.pathname === "/debug/parse") {
+        const page = await fetchSourceWithFallback(await getConfig(), true);
+        if (!page) {
+          return Response.json({ error: "Không tải được trang nguồn" }, { status: 500, headers: corsHeaders() });
+        }
+        const html = page.html;
+        const dem = (s) => html.split(s).length - 1;
+
+        const a = parseListA(html, page.origin);
+        const b = parseListB(html, page.origin);
+
+        // Vì sao từng khối của template B bị loại.
+        const khoi = html.split("grid-matches__item-match");
+        let thieu_href = 0, thieu_ten_doi = 0;
+        for (let i = 1; i < khoi.length; i++) {
+          const blk = khoi[i];
+          const h = blk.match(/href="([^"]*\/truc-tiep\/[^"]*)"/);
+          const co_href = h && !/\/link\//.test(h[1]);
+          const co_ten = /grid-match__team--home-name/.test(blk) && /grid-match__team--away-name/.test(blk);
+          if (!co_href) thieu_href++;
+          else if (!co_ten) thieu_ten_doi++;
+        }
+
+        return Response.json({
+          worker_version: WORKER_VERSION,
+          origin: page.origin,
+          html_bytes: html.length,
+          parser_a: a.length,
+          parser_b: b.length,
+          dung_parser: b.length > a.length ? "B" : "A",
+          b_so_khoi: Math.max(0, khoi.length - 1),
+          b_bo_qua: { thieu_href, thieu_ten_doi },
+          // Đếm thô từng dấu hiệu parser dựa vào. Cái nào = 0 là cái đó đã đổi tên.
+          dau_hieu: {
+            "grid-matches__item-match": dem("grid-matches__item-match"),
+            'class="grid-match"': dem('class="grid-match"'),
+            "grid-match__team--home-name": dem("grid-match__team--home-name"),
+            "grid-match__team--away-name": dem("grid-match__team--away-name"),
+            "href chứa /truc-tiep/": dem("/truc-tiep/"),
+            "data-status": dem("data-status"),
+            "data-runtime": dem("data-runtime"),
+            "team-logo-0": dem("team-logo-0"),
+            "grid-match__league": dem("grid-match__league"),
+            "grid-match__date": dem("grid-match__date")
+          },
+          vi_du_tran: b.slice(0, 2),
+          // Một khối trận thật, cắt ngắn cho dán được. Đây là thứ cho biết bố cục mới
+          // trông ra sao khi các selector trên đã đổi tên.
+          mau_html: khoi.length > 1 ? khoi[1].slice(0, 1200) : null
+        }, { headers: corsHeaders() });
+      }
+
       // ---- Endpoint debug: domain đang dùng. ?probe=1 ép dò lại ngay. ----
       if (url.pathname === "/debug/discovery") {
         const cfg = await getConfig();
-        let probe = null;
+        let probe = null, trace = null;
         if (url.searchParams.has("probe")) {
-          const p = await fetchSourceWithFallback(cfg, true);
+          trace = [];
+          const p = await fetchSourceWithFallback(cfg, true, trace);
           probe = p
             ? { origin: p.origin, co_luoi_tran: p.ok, html_bytes: p.html.length }
             : { origin: null, co_luoi_tran: false, html_bytes: 0 };
         }
         return Response.json({
+          worker_version: WORKER_VERSION,
           current_domain: _domainState.url,
           resolved_from: _domainState.from,
           age_ms: _domainState.at ? Date.now() - _domainState.at : 0,
@@ -803,7 +872,9 @@ export default {
             pin_domain: cfg.pin_domain === true
           } : null,
           probe,
-          note: "current_domain rỗng = tiến trình này chưa phục vụ request nào tới /. Gọi ?probe=1 để ép dò."
+          // Nhật ký từng ứng viên và từng đường dẫn đã thử, theo đúng thứ tự.
+          trace,
+          note: "current_domain rỗng = tiến trình này chưa phục vụ request nào tới /. Gọi ?probe=1 để ép dò và xem trace."
         }, { headers: corsHeaders() });
       }
 
