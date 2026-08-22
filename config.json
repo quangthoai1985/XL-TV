@@ -1,12 +1,12 @@
 {
   "sources": {
-    "xoilacz": "https://nmsba.com/"
+    "xoilacz": "https://xoilaczziiz.tv/"
   },
-  "source_url": "https://nmsba.com/",
+  "source_url": "https://xoilaczziiz.tv/",
   "anchor_domains": [
     "xoilacz.io",
     "xoilacz.vip"
   ],
   "pin_domain": false,
-  "note": "Worker tu bam theo domain moi: moi lan cao no doc response.url xem request dap xuong dau, nen KHONG can sua file nay khi nguon doi ten mien. source_url chi la luoi an toan khi ca 2 anchor cung chet. anchor_domains sua duoc o day (co tac dung that). Dat pin_domain=true de ep dung dung source_url, khong tu chuyen di dau. Kiem tra: /debug/discovery"
+  "note": "Worker tu bam theo domain moi qua anchor: moi lan cao no doc response.url xem request dap xuong dau, nen KHONG can sua file nay khi nguon doi ten mien. Do da xac minh 22/08/2026: xoilacz.io -> xoilaczziiz.tv (co luoi tran). source_url chi la luoi an toan khi ca 2 anchor cung chet, va la Referer cho /stream khi tien trinh vua khoi dong. anchor_domains sua duoc o day (co tac dung that). Dat pin_domain=true de ep dung dung source_url, khong tu chuyen di dau. Kiem tra: /debug/discovery?probe=1 va /debug/parse"
 }

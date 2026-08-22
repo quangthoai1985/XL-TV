@@ -263,7 +263,7 @@ test("E1: trace khai đúng từng ứng viên, nơi request đáp xuống và l
   const worker = await loadWorker();
   const dbg = await callDebug(worker, "?probe=1");
 
-  assert.equal(dbg.worker_version, "1.3.1", "phải khai version để biết đã deploy bản nào");
+  assert.match(dbg.worker_version, /^\d+\.\d+\.\d+$/, "phải khai version để biết đã deploy bản nào");
   assert.ok(Array.isArray(dbg.trace) && dbg.trace.length > 0);
 
   const flat = JSON.stringify(dbg.trace);

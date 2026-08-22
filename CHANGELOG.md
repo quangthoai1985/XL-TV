@@ -4,6 +4,42 @@
 
 ---
 
+## [1.4.0] - 2026-08-22
+
+### Đo được: cơ chế bám domain ĐÃ CHẠY ĐÚNG
+
+Kết quả `/debug/discovery?probe=1` trên Worker thật:
+
+```
+worker_version : 1.3.1                    → bản mới đã deploy
+current_domain : https://xoilaczziiz.tv   → domain mới, tự tìm ra
+resolved_from  : anchor
+trace          : xoilacz.io/ → 200 → đáp xuống xoilaczziiz.tv → có lưới trận, 1.443.284 bytes
+```
+
+Đúng **một** ứng viên, **một** request, trúng ngay. Anchor vẫn được chủ site duy trì, và bản 1.3.0 bắt kịp domain mới như thiết kế. Vậy nguyên nhân "trận đấu không cập nhật" **không nằm ở khâu tìm domain** — nó nằm ở khâu sau: bóc tách HTML.
+
+### Changed: `config.json` → `xoilaczziiz.tv`
+
+`nmsba.com` đã cũ. Giá trị này không ảnh hưởng đường chính (anchor lo việc đó), nhưng nó là lưới an toàn khi cả 2 anchor cùng chết, **và** là `Referer` mà `/stream` dùng khi tiến trình vừa khởi động chưa kịp resolve — để sai thì phát video có thể hỏng.
+
+### Added: `/debug/parse`
+
+Cào trang thật rồi đếm từng dấu hiệu mà parser dựa vào — selector nào về `0` là selector đó đã bị đổi tên trên bố cục mới:
+
+- `parser_a` / `parser_b`: mỗi parser ra bao nhiêu trận
+- `b_so_khoi`: tách được bao nhiêu khối trận
+- `b_bo_qua`: bao nhiêu khối bị loại vì thiếu href, bao nhiêu vì thiếu tên đội
+- `dau_hieu`: số lần xuất hiện của `grid-matches__item-match`, `grid-match__team--home-name`, `data-status`, `data-runtime`, `team-logo-0`, `/truc-tiep/`…
+- `vi_du_tran`: 2 trận đầu bóc được
+- `mau_html`: một khối trận thật, cắt 1200 ký tự — thứ cho biết bố cục mới trông ra sao
+
+### Changed: `WORKER_VERSION` thành hằng số dùng chung
+
+Trước rải rác chuỗi cứng trong từng endpoint. Nay một chỗ, mọi endpoint debug cùng khai.
+
+---
+
 ## [1.3.1] - 2026-08-22
 
 Bản 1.3.0 đã lên `main` nhưng trận đấu **vẫn chưa cập nhật**. Không quan sát được hệ thống chạy thật thì mọi phán đoán tiếp theo đều là đoán mò, nên bản này bổ sung đúng phần quan sát còn thiếu.
