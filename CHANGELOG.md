@@ -4,6 +4,46 @@
 
 ---
 
+## [1.3.0] - 2026-08-22
+
+Nguồn đổi tên miền, hệ thống **không bắt kịp** — danh sách trận đứng yên ở dữ liệu cũ. Bản 1.2.0 hứa "tự bám domain" nhưng có ba lỗ hổng, sửa cả ba ở đây.
+
+### Fixed: chỉ gọi `/truc-tiep/`, không bao giờ thử trang gốc
+
+Lưới trận nằm ở **trang gốc**. Đường dẫn `/truc-tiep/` chỉ tình cờ chạy được vì `nmsba.com` 301 nó về `/`. Khi anchor redirect **giữ nguyên đường dẫn** sang domain mới mà bố cục mới không có `/truc-tiep/`, request trả 404 và ứng viên đó bị loại — kể cả khi nó chính là domain đang sống.
+
+Nay thử `/` trước, `/truc-tiep/` chỉ còn là dự phòng (`SOURCE_PATHS`).
+
+### Fixed: `if (!res.ok) return null` vứt mất manh mối quý nhất
+
+Kể cả khi trang trả 404, `res.url` đã cho biết request đáp xuống domain nào — đúng thứ đang đi tìm. Bản cũ vứt cả response.
+
+Nay đọc `origin` trước rồi mới xét nội dung. Nếu request đáp xuống một domain khác domain đã gọi, domain đó được **xếp vào hàng đợi để thử lại từ trang gốc** — lần theo biển chỉ đường thay vì bỏ cuộc. Chặn `MAX_CANDIDATES = 8` để không nổ số subrequest.
+
+### Fixed: domain đã nhớ được tin vô thời hạn *(nguyên nhân chính)*
+
+Domain cũ thường **không chết hẳn mà đóng băng** — vẫn trả 200 kèm lưới trận của mấy hôm trước. `looksLikeSource()` thấy có lưới là nhận, nên tiến trình bám chết vào domain cũ, anchor không bao giờ được hỏi tới, và người dùng xem mãi danh sách cũ. Đây khớp đúng triệu chứng gặp phải: không báo lỗi, chỉ là trận không cập nhật.
+
+Nay `_domainState` có thêm mốc `verified_at` — lần cuối **đi qua anchor** mà ra domain này. Chỉ đường anchor mới được đóng dấu; resolve bằng domain đã nhớ **không tự gia hạn** (nếu không thì domain đóng băng cứ tự gia hạn cho chính nó mãi mãi). Quá `DOMAIN_TTL_MS` (10 phút), anchor lên đầu hàng đợi.
+
+**Không tốn thêm request:** đi qua anchor thì redirect tự dẫn về domain sống và trả luôn trang cần cào — vẫn đúng 1 request như đường nhanh.
+
+### Added: bộ kiểm thử (`test/`)
+
+12 test chạy trên "internet giả" (`test/fake-source.mjs`) mô phỏng redirect, 404, trang park, domain chết, GitHub 429. Chạy bằng `npm test`.
+
+Bản 1.2.0 nói "27 test PASS" nhưng không commit lại nên không kiểm chứng được — lần này bộ test nằm trong repo. **Đã đối chứng: 8/12 test này FAIL trên code 1.2.0, 12/12 PASS trên 1.3.0.**
+
+### Changed: `/debug/discovery`
+
+Thêm `verified_age_ms` (tuổi mốc xác minh qua anchor, `null` = chưa lần nào), `verify_ttl_ms`, `paths_tried`.
+
+### Tương thích
+
+Không đổi đường dẫn, tham số hay cấu trúc JSON của `/`, `/detail`, `/stream`. **APK không cần build lại.**
+
+---
+
 ## [1.2.0] - 2026-08-21
 
 Viết lại cơ chế bám domain nguồn. Mục tiêu: **không bao giờ phải sửa URL nguồn bằng tay nữa.**

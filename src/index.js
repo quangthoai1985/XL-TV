@@ -57,12 +57,44 @@ async function getConfig() {
 // dùng chung của Cloudflare (không suy ngược ra tên miền được) và đều là apex domain
 // nên không có bản ghi CNAME. Đoán tên theo mẫu cũng vô ích: domain mới tên "nmsba.com",
 // không còn dính dáng gì tới chữ "xoilac".
+//
+// --- Ba chỗ hỏng của bản 1.2.0, sửa ở bản 1.3.0 ---
+//
+// 1. CHỈ GỌI /truc-tiep/. Lưới trận nằm ở TRANG GỐC; /truc-tiep/ chỉ tình cờ chạy được
+//    vì nmsba.com 301 đường dẫn đó về "/". Khi anchor redirect giữ nguyên đường dẫn sang
+//    domain mới mà bố cục mới không có /truc-tiep/ thì request trả 404 → mất luôn ứng
+//    viên đó. Nay thử "/" trước, /truc-tiep/ chỉ là dự phòng.
+//
+// 2. `if (!res.ok) return null` VỨT MẤT MANH MỐI. Kể cả khi trang trả 404, res.url đã
+//    cho biết request đáp xuống domain nào — đúng thứ đang cần tìm. Nay đọc origin
+//    trước, rồi mới xét nội dung; domain lạ phát hiện được sẽ đưa vào hàng đợi thử lại
+//    từ trang gốc.
+//
+// 3. DOMAIN ĐÃ NHỚ ĐƯỢC TIN VÔ THỜI HẠN. Domain cũ thường không chết hẳn mà đóng băng —
+//    vẫn trả 200 kèm lưới trận của mấy hôm trước. looksLikeSource() thấy có lưới là nhận,
+//    nên tiến trình bám chết vào domain cũ và người dùng xem mãi danh sách cũ; anchor
+//    không bao giờ được hỏi tới. Nay đếm giờ từ lần XÁC MINH QUA ANCHOR gần nhất
+//    (verified_at), quá DOMAIN_TTL_MS thì anchor lên đầu hàng đợi. Không tốn thêm
+//    request: đi qua anchor thì redirect tự dẫn về domain sống và trả luôn trang cần cào.
 
 const ANCHOR_DEFAULT = ["https://xoilacz.io", "https://xoilacz.vip"];
 
+// Đường dẫn có thể chứa lưới trận, thử theo thứ tự này trên mỗi domain ứng viên.
+const SOURCE_PATHS = ["/", "/truc-tiep/"];
+
 // Domain đang dùng. Mất khi Cloudflare tạo tiến trình mới, nhưng không sao: lần tải
 // danh sách kế tiếp resolve lại đúng trong đúng 1 request (xem fetchSourcePage).
-let _domainState = { url: null, at: 0, from: null };
+//   at          — lần cuối resolve được (bất kể bằng đường nào)
+//   verified_at — lần cuối ĐI QUA ANCHOR mà ra domain này. Chỉ mốc này mới chứng minh
+//                 domain còn là domain chính chủ đang sống, nên nó điều khiển TTL.
+let _domainState = { url: null, at: 0, from: null, verified_at: 0 };
+
+// Sau bấy nhiêu lâu kể từ lần xác minh qua anchor gần nhất, bắt buộc hỏi lại anchor.
+const DOMAIN_TTL_MS = 10 * 60 * 1000;
+
+// Trần số domain thử trong một lần resolve. Vòng lặp có thể tự nối thêm ứng viên khi
+// phát hiện redirect trỏ sang domain lạ, nên cần chặn để không nổ số subrequest.
+const MAX_CANDIDATES = 8;
 
 // Chặn một fetch treo kéo dài cả request của người dùng.
 const SOURCE_TIMEOUT_MS = 15000;
@@ -95,19 +127,30 @@ function looksLikeSource(html) {
   return html.includes("grid-matches__item-match") || html.includes('class="grid-match"');
 }
 
+// from bắt đầu bằng "anchor" = kết quả đi qua biển chỉ đường chính chủ → mới được phép
+// đóng dấu verified_at. Resolve bằng domain đã nhớ thì KHÔNG gia hạn, nếu không TTL vô
+// nghĩa: domain cũ đóng băng cứ trả lưới trận cũ là tự gia hạn cho chính nó mãi mãi.
 function rememberDomain(origin, from) {
   if (!origin) return;
   if (_domainState.url !== origin) {
     console.log(`[domain] ${_domainState.url || "(chưa có)"} → ${origin} (nguồn: ${from})`);
   }
-  _domainState = { url: origin, at: Date.now(), from };
+  const viaAnchor = typeof from === "string" && from.startsWith("anchor");
+  _domainState = {
+    url: origin,
+    at: Date.now(),
+    from,
+    verified_at: viaAnchor ? Date.now() : (_domainState.url === origin ? _domainState.verified_at : 0)
+  };
 }
 
-// Tải trang danh sách trận từ 1 domain ứng viên.
-// Trả { html, origin, ok } hoặc null. origin = nơi request THỰC SỰ đáp xuống sau khi đi
+// Tải 1 đường dẫn trên 1 domain ứng viên.
+// Trả { html, origin, status, ok }. origin = nơi request THỰC SỰ đáp xuống sau khi đi
 // hết chuỗi redirect — đây chính là cơ chế tự bám domain mới.
-async function fetchSourcePage(base, noCache) {
-  const res = await fetch(base.replace(/\/$/, "") + "/truc-tiep/", {
+// KHÔNG bỏ qua khi !res.ok: trang 404 vẫn khai ra origin, và origin mới lạ chính là
+// manh mối đắt nhất khi nguồn vừa dời nhà.
+async function fetchSourcePage(base, path, noCache) {
+  const res = await fetch(base.replace(/\/$/, "") + path, {
     headers: { "User-Agent": UA },
     redirect: "follow",
     signal: AbortSignal.timeout(SOURCE_TIMEOUT_MS),
@@ -115,9 +158,25 @@ async function fetchSourcePage(base, noCache) {
     // không phải cào lại trang nguồn 1.35 MB.
     cf: noCache ? { cacheTtl: 0, cacheEverything: false } : { cacheTtl: 30, cacheEverything: true }
   });
-  if (!res.ok) return null;
-  const html = await res.text();
-  return { html, origin: normOrigin(res.url) || normOrigin(base), ok: looksLikeSource(html) };
+  const origin = normOrigin(res.url) || normOrigin(base);
+  let html = "";
+  try { html = await res.text(); } catch (e) {}
+  return { html, origin, status: res.status, ok: res.ok && looksLikeSource(html) };
+}
+
+// Thử lần lượt các đường dẫn trên một domain, dừng ở cái đầu tiên có lưới trận.
+// Không có cái nào đạt thì trả về lần thử "khá nhất" để caller còn đọc được origin.
+async function probeCandidate(base, noCache) {
+  let best = null;
+  for (const path of SOURCE_PATHS) {
+    let r = null;
+    try { r = await fetchSourcePage(base, path, noCache); } catch (e) { r = null; }
+    if (!r) continue;
+    if (r.ok) return r;
+    // Ưu tiên giữ lần thử trả 200 (trang đọc được) hơn lần trả lỗi.
+    if (!best || (r.status === 200 && best.status !== 200)) best = r;
+  }
+  return best;
 }
 
 // Thử lần lượt: domain đang nhớ → anchor → config.json → hardcode.
@@ -126,29 +185,40 @@ async function fetchSourceWithFallback(config, noCache) {
   // pin_domain: true trong config.json = phanh tay. Ép dùng đúng domain trong config,
   // không tự chuyển đi đâu hết. Dùng khi cần can thiệp khẩn cấp.
   if (config && config.pin_domain === true) {
-    let r = null;
-    try { r = await fetchSourcePage(configDomain(config) || SOURCE_DEFAULT, noCache); } catch (e) {}
+    const r = await probeCandidate(configDomain(config) || SOURCE_DEFAULT, noCache);
     if (r) rememberDomain(r.origin, "pin");
     return r;
   }
 
   const candidates = [];
+  const seen = new Set();
   const add = (u, from) => {
     const n = normOrigin(u);
-    if (n && !candidates.some((c) => c.url === n)) candidates.push({ url: n, from });
+    if (n && !seen.has(n)) { seen.add(n); candidates.push({ url: n, from }); }
   };
-  add(_domainState.url, "nhớ");
+
+  // Domain đã nhớ chỉ được đứng đầu hàng khi còn hạn xác minh. Hết hạn thì anchor lên
+  // trước để bắt kịp lần đổi tên miền gần nhất — kể cả khi domain cũ vẫn trả về lưới
+  // trận (đóng băng), vì đó đúng là ca mà bản trước bám chết vào domain cũ.
+  const fresh = _domainState.url && (Date.now() - _domainState.verified_at) < DOMAIN_TTL_MS;
+  if (fresh) add(_domainState.url, "nhớ");
   for (const a of anchorList(config)) add(a, "anchor");
+  if (!fresh) add(_domainState.url, "nhớ (hết hạn)");
   add(configDomain(config), "config");
   add(SOURCE_DEFAULT, "mặc định");
 
   let weak = null; // trả 200 nhưng không thấy lưới trận
-  for (const c of candidates) {
-    let r = null;
-    try { r = await fetchSourcePage(c.url, noCache); } catch (e) { r = null; }
+  // Duyệt bằng chỉ số vì hàng đợi có thể dài thêm ngay trong lúc chạy (xem "manh mối").
+  for (let i = 0; i < candidates.length && i < MAX_CANDIDATES; i++) {
+    const c = candidates[i];
+    const r = await probeCandidate(c.url, noCache);
     if (!r) continue;
     if (r.ok) { rememberDomain(r.origin, c.from); return r; }
-    if (!weak) weak = { page: r, from: c.from };
+    // Manh mối: request đáp xuống một domain khác domain đã gọi → nguồn đã dời nhà,
+    // chỉ là đường dẫn vừa gọi không tồn tại trên bố cục mới. Xếp domain đó vào hàng
+    // đợi để thử lại đàng hoàng từ trang gốc.
+    if (r.origin && r.origin !== c.url) add(r.origin, `theo ${c.from}`);
+    if (!weak && r.status === 200 && r.html) weak = { page: r, from: c.from };
   }
 
   // Không nơi nào có lưới trận → nhiều khả năng nguồn đổi giao diện. Vẫn trả trang đọc
@@ -719,7 +789,12 @@ export default {
           current_domain: _domainState.url,
           resolved_from: _domainState.from,
           age_ms: _domainState.at ? Date.now() - _domainState.at : 0,
+          // Lần cuối domain này được xác minh qua anchor. 0 = chưa lần nào → lượt cào
+          // kế tiếp sẽ hỏi anchor trước.
+          verified_age_ms: _domainState.verified_at ? Date.now() - _domainState.verified_at : null,
+          verify_ttl_ms: DOMAIN_TTL_MS,
           anchors: anchorList(cfg),
+          paths_tried: SOURCE_PATHS,
           hardcoded_default: SOURCE_DEFAULT,
           config: cfg ? {
             source_url: cfg.source_url,
