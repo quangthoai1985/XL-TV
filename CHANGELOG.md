@@ -4,6 +4,30 @@
 
 ---
 
+## [1.3.1] - 2026-08-22
+
+Bản 1.3.0 đã lên `main` nhưng trận đấu **vẫn chưa cập nhật**. Không quan sát được hệ thống chạy thật thì mọi phán đoán tiếp theo đều là đoán mò, nên bản này bổ sung đúng phần quan sát còn thiếu.
+
+### Added: `worker_version` trong `/debug/discovery`
+
+Repo này deploy qua Cloudflare Workers Builds, và đã từng **hỏng âm thầm** (xem commit `99c5fb5` "Trigger redeploy after GitHub webhook outage"). Gọi debug mà thấy version cũ — hoặc không thấy trường này — nghĩa là code mới chưa hề chạy, và mọi việc sửa code đều vô nghĩa cho tới khi deploy lại.
+
+### Added: `trace` trong `/debug/discovery?probe=1`
+
+Nhật ký từng ứng viên và từng đường dẫn đã thử, đúng thứ tự, mỗi dòng ghi: URL đã gọi, HTTP status, **domain mà request thực sự đáp xuống**, có lưới trận hay không, kích thước HTML. Anchor chết thì ghi thẳng thông báo lỗi.
+
+Một lần gọi là dựng lại được toàn bộ đường đi và chỉ ra chính xác mắt xích hỏng — cụ thể là phân biệt được ba khả năng còn lại:
+
+1. **Anchor không còn trỏ về domain sống** → toàn bộ thiết kế "bám theo biển chỉ đường" mất chỗ dựa, phải đổi hướng.
+2. **Domain cũ đóng băng vẫn trả lưới trận** → `looksLikeSource()` nhận nhầm, cần thêm dấu hiệu nhận biết dữ liệu cũ.
+3. **Nguồn đổi bố cục HTML** → `looksLikeSource()` trượt ở mọi nơi, phải cập nhật parser.
+
+### Kiểm thử
+
+Thêm 2 test cho trace (khai đúng nơi đáp xuống, không tự đi cào khi không có `?probe=1`). **14/14 PASS.**
+
+---
+
 ## [1.3.0] - 2026-08-22
 
 Nguồn đổi tên miền, hệ thống **không bắt kịp** — danh sách trận đứng yên ở dữ liệu cũ. Bản 1.2.0 hứa "tự bám domain" nhưng có ba lỗ hổng, sửa cả ba ở đây.

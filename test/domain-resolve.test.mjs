@@ -250,6 +250,43 @@ test("D6: khởi động nguội đi thẳng qua anchor và đóng dấu xác mi
   assert.ok(after.verified_age_ms !== null);
 });
 
+// --- Công cụ chẩn đoán ---
+
+test("E1: trace khai đúng từng ứng viên, nơi request đáp xuống và lý do trượt", async () => {
+  installFakeFetch({
+    [A1]: { pages: { "*": { html: PARKED_HTML } } }, // anchor 1: trang park
+    [A2]: { dead: true },                            // anchor 2: chết
+    [OLD]: { redirect: NEW, keepPath: true },        // domain cũ đã dời nhà
+    [NEW]: serves("moi", 3)
+  }, CONFIG);
+
+  const worker = await loadWorker();
+  const dbg = await callDebug(worker, "?probe=1");
+
+  assert.equal(dbg.worker_version, "1.3.1", "phải khai version để biết đã deploy bản nào");
+  assert.ok(Array.isArray(dbg.trace) && dbg.trace.length > 0);
+
+  const flat = JSON.stringify(dbg.trace);
+  assert.ok(flat.includes(A1), "phải có anchor bị park trong trace");
+  assert.ok(flat.includes("loi"), "anchor chết phải ghi rõ lỗi");
+  assert.ok(flat.includes(NEW), "phải khai được domain mà request đáp xuống");
+
+  // Ứng viên park phải bị ghi là không có lưới trận, không được nhận bừa.
+  const parked = dbg.trace.find((t) => t.thu && t.thu.startsWith(A1) && t.status === 200);
+  assert.equal(parked.co_luoi_tran, false);
+
+  assert.equal(dbg.probe.origin, NEW);
+  assert.equal(dbg.probe.co_luoi_tran, true);
+});
+
+test("E2: không có ?probe=1 thì trace là null (không tự đi cào)", async () => {
+  installFakeFetch({ [A1]: { redirect: NEW }, [A2]: { dead: true }, [NEW]: serves("moi", 2) }, CONFIG);
+  const worker = await loadWorker();
+  const dbg = await callDebug(worker);
+  assert.equal(dbg.trace, null);
+  assert.equal(dbg.probe, null);
+});
+
 // Đẩy tiến trình qua hạn xác minh: gọi lặp cho tới khi verified_age_ms vượt TTL là
 // không khả thi trong test, nên dùng đúng đòn bẩy sẵn có — ?probe=1 sau khi giả lập
 // thời gian trôi bằng cách chỉnh Date.now.
