@@ -44,7 +44,8 @@ export const NOT_FOUND_HTML = `<!doctype html><html><body><h1>404 Not Found</h1>
 //
 // web: { "https://origin": spec }
 // config: object trả về cho DEFAULT_CONFIG_URL (null = GitHub lỗi)
-export function installFakeFetch(web, config) {
+// update: object trả về cho update.json (null = GitHub 429, bỏ trống = chưa có file)
+export function installFakeFetch(web, config, update) {
   const log = [];
 
   function resolveOne(target, hop) {
@@ -71,6 +72,17 @@ export function installFakeFetch(web, config) {
   globalThis.fetch = async (input, init) => {
     const target = typeof input === "string" ? input : input.url;
     log.push(target);
+
+    // update.json trên GitHub (bản kê khai phiên bản APK). Phải xét TRƯỚC config.json vì
+    // cả hai cùng nằm trên raw.githubusercontent.com.
+    if (target.includes("update.json")) {
+      if (update === undefined) return new Response("not found", { status: 404 });
+      if (update === null) return new Response("rate limited", { status: 429 });
+      return new Response(JSON.stringify(update), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    }
 
     // config.json trên GitHub
     if (target.includes("raw.githubusercontent.com")) {

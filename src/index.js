@@ -10,12 +10,14 @@
  *   GET /                 → Danh sách trận đấu
  *   GET /detail?url=      → Chi tiết trận: BLV + link stream
  *   GET /stream?url=      → Lấy URL stream thật
+ *   GET /update           → Bản kê khai phiên bản APK mới nhất (app tự cập nhật)
+ *   GET /apk              → 302 tới file APK mới nhất
  *   GET /debug/discovery  → Domain đang dùng (?probe=1 để ép dò lại)
  */
 
 // Đổi mỗi khi cơ chế resolve/parse thay đổi. Gọi /debug/* mà thấy số cũ tức là
 // Cloudflare chưa deploy bản mới — đã từng xảy ra âm thầm với repo này.
-const WORKER_VERSION = "1.5.0";
+const WORKER_VERSION = "1.6.0";
 
 const DEFAULT_CONFIG_URL = "https://raw.githubusercontent.com/quangthoai1985/XL-TV/main/config.json";
 
@@ -43,6 +45,30 @@ async function getConfig() {
   } catch (e) {}
   // GitHub lỗi/429 → dùng lại bản đọc được gần nhất thay vì rơi thẳng về hardcode.
   return _cfgCache.value;
+}
+
+// ====== CẬP NHẬT APP (OTA) ======
+// File APK nằm ở GitHub Releases; update.json trong repo là bản kê khai (phiên bản nào,
+// tải ở đâu). Worker đứng giữa để app trên TV CHỈ cần biết đúng domain Worker: sau này
+// đổi chỗ host APK thì sửa update.json là xong, không phải build lại app đã cài.
+const UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/quangthoai1985/XL-TV/main/update.json";
+
+// Nhớ 60 giây, đúng lý do như config.json: gọi raw.githubusercontent liên tục sẽ ăn 429.
+let _updCache = { at: 0, value: null };
+const UPDATE_TTL_MS = 60 * 1000;
+
+async function getUpdateManifest() {
+  const now = Date.now();
+  if (_updCache.value && now - _updCache.at < UPDATE_TTL_MS) return _updCache.value;
+  try {
+    const res = await fetch(UPDATE_MANIFEST_URL, { cf: { cacheTtl: 60, cacheEverything: true } });
+    if (res.ok) {
+      const json = await res.json();
+      _updCache = { at: now, value: json };
+      return json;
+    }
+  } catch (e) {}
+  return _updCache.value;
 }
 
 // ====== DOMAIN NGUỒN TỰ CẬP NHẬT ======
@@ -777,6 +803,49 @@ export default {
       });
     }
 
+    // --- Cập nhật app: bản kê khai phiên bản mới nhất ---
+    // App gọi lúc mở lên, so version_code với bản đang cài. Không cần config nguồn.
+    if (url.pathname === "/update") {
+      const m = await getUpdateManifest();
+      // Đọc không được (GitHub 429/lỗi mạng) hoặc chưa khai báo → trả version_code 0.
+      // App sẽ hiểu là "không có bản mới" và im lặng, thay vì ném popup lỗi vào mặt
+      // người đang xem bóng.
+      const vc = m ? Number(m.version_code) || 0 : 0;
+      if (!vc) {
+        return Response.json(
+          { version_code: 0, version_name: "", apk_url: "", changelog: "", mandatory: false, size_bytes: 0 },
+          { headers: corsHeaders() }
+        );
+      }
+      return Response.json({
+        version_code: vc,
+        version_name: String(m.version_name || ""),
+        // Luôn trả link về chính Worker, không trả thẳng link GitHub: app chỉ biết một
+        // domain duy nhất, đổi chỗ host về sau không cần đụng tới app.
+        apk_url: url.origin + "/apk",
+        changelog: String(m.changelog || ""),
+        mandatory: m.mandatory === true,
+        size_bytes: Number(m.size_bytes) || 0
+      }, { headers: corsHeaders() });
+    }
+
+    // --- Cập nhật app: chuyển hướng tới file APK thật ---
+    // 302 chứ không proxy: file ~11 MB, để GitHub trả thẳng cho TV, Worker không gánh
+    // băng thông và không đụng giới hạn thời gian chạy.
+    if (url.pathname === "/apk") {
+      const m = await getUpdateManifest();
+      const target = m && typeof m.apk_url === "string" ? m.apk_url : "";
+      // Chỉ chấp nhận https tuyệt đối — chặn việc một update.json bị sửa bậy biến
+      // endpoint này thành bàn đạp chuyển hướng đi đâu cũng được.
+      if (!/^https:\/\//i.test(target)) {
+        return new Response("update.json chưa khai báo apk_url hợp lệ", {
+          status: 503,
+          headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" }
+        });
+      }
+      return Response.redirect(target, 302);
+    }
+
     // --- Proxy stream cho trình duyệt (gắn Referer/Origin/UA + CORS + rewrite m3u8) ---
     // Đặt TRƯỚC getConfig() để mỗi segment không phải fetch config.json (tiết kiệm subrequest).
     if (url.pathname === "/proxy") {
@@ -946,16 +1015,6 @@ const WEB_HTML = `<!doctype html>
     border-bottom:1px solid rgba(0,230,118,.18);
   }
   .logo{font-size:26px; font-weight:900; color:var(--accent); white-space:nowrap}
-  .filterbtn{
-    border:1px solid rgba(255,255,255,.2); background:var(--panel); color:#B9C2D0;
-    border-radius:20px; padding:8px 16px; font-size:14px; cursor:pointer;
-    font-weight:600; transition:.15s; margin-left:16px;
-  }
-  .filterbtn:hover{border-color:var(--accent); transform:translateY(-1px)}
-  .filterbtn.on{background:var(--live); color:#fff; border-color:var(--live)}
-  /* Nút chọn môn bật thì dùng màu accent, để phân biệt với nút lọc live màu đỏ. */
-  #sbtn{margin-left:8px}
-  #sbtn.on{background:var(--accent); color:#06210F; border-color:var(--accent)}
   .reload{
     border:1px solid rgba(255,255,255,.2); background:var(--panel); color:#B9C2D0;
     border-radius:20px; padding:8px 16px; font-size:14px; cursor:pointer;
@@ -1047,8 +1106,6 @@ const WEB_HTML = `<!doctype html>
 <body>
 <header>
   <div class="logo">⚽ XL TV</div>
-  <button class="filterbtn on" id="fbtn">● Đang live</button>
-  <button class="filterbtn on" id="sbtn">⚽ Bóng đá</button>
   <div class="count" id="count">0 trận</div>
   <button class="reload" id="reload">🔄 Tải lại</button>
 </header>
@@ -1078,13 +1135,9 @@ const WEB_HTML = `<!doctype html>
 <script>
 var API = location.origin;
 var hls = null, flv = null;
-// Mặc định chỉ tải trận đang đá + sắp đá 1 giờ tới: danh sách ngắn hơn nên
-// bớt hẳn số logo phải kéo qua /proxy (mỗi thẻ trận 3 ảnh).
-var liveOnly = true;
-// Nguồn trộn chung bóng đá với esports, tennis, bóng rổ… vào một lưới, và phần lớn
-// KHÔNG phải bóng đá. Đây là app bóng đá nên mặc định lọc sẵn, nếu không trận bóng đá
-// bị chôn dưới hàng chục trận môn khác.
-var footballOnly = true;
+// Luôn lấy đủ trận BÓNG ĐÁ trong ngày: không gửi ?filter=live (số trận khớp đúng trang
+// nguồn) và luôn gửi ?sport=football (nguồn trộn chung esports, tennis, bóng rổ… vào một
+// lưới, phần lớn không phải bóng đá). Worker vẫn hỗ trợ cả hai tham số cho APK cũ.
 
 // Mã hoá base64url để domain nguồn không lộ trong URL -> né bộ lọc web (ESET, ad-block…)
 function b64(s){ return btoa(unescape(encodeURIComponent(s))).replace(/\\+/g,'-').replace(/\\//g,'_').replace(/=+$/,''); }
@@ -1112,18 +1165,15 @@ function loadMatches(){
   grid.innerHTML = '';
   var reloadBtn = document.getElementById('reload');
   reloadBtn.disabled = true; reloadBtn.textContent = '⏳ Đang tải...';
-  fetch(API + '/?enc=1' + (liveOnly ? '&filter=live' : '') + (footballOnly ? '&sport=football' : '') + '&t=' + Date.now())
+  fetch(API + '/?enc=1&sport=football&t=' + Date.now())
     .then(function(r){ return r.json(); })
     .then(function(data){
       var list = (data && data.matches) || [];
-      var totalAll = (data && data.total_all) || list.length;
-      countEl.textContent = liveOnly ? (list.length + '/' + totalAll + ' trận') : (list.length + ' trận');
+      countEl.textContent = list.length + ' trận';
       renderMatches(list);
       if(list.length) setStatus('', false);
       else if(data && data.error) setStatus('Lỗi nguồn: ' + data.error, true);
-      else if(liveOnly && footballOnly) setStatus('Không có trận bóng đá nào đang đá hay sắp đá. Bấm "Đang live" để xem cả ' + totalAll + ' trận bóng đá hôm nay, hoặc bấm "Bóng đá" để xem thêm môn khác.', false);
-      else if(liveOnly) setStatus('Không có trận nào đang đá hay sắp đá. Bấm "Đang live" để xem tất cả ' + totalAll + ' trận.', false);
-      else setStatus('Không có trận nào.', false);
+      else setStatus('Không có trận bóng đá nào hôm nay. Bấm "Tải lại" để thử lại.', false);
     })
     .catch(function(e){ setStatus('Lỗi kết nối: ' + e.message, true); })
     .finally(function(){ reloadBtn.disabled = false; reloadBtn.textContent = '🔄 Tải lại'; });
@@ -1289,20 +1339,6 @@ document.getElementById('fsbtn').onclick = function(){
 };
 
 document.getElementById('reload').onclick = loadMatches;
-document.getElementById('fbtn').onclick = function(){
-  liveOnly = !liveOnly;
-  var b = document.getElementById('fbtn');
-  b.classList.toggle('on', liveOnly);
-  b.textContent = liveOnly ? '● Đang live' : '📋 Tất cả trận';
-  loadMatches();
-};
-document.getElementById('sbtn').onclick = function(){
-  footballOnly = !footballOnly;
-  var b = document.getElementById('sbtn');
-  b.classList.toggle('on', footballOnly);
-  b.textContent = footballOnly ? '⚽ Bóng đá' : '🏆 Mọi môn';
-  loadMatches();
-};
 document.addEventListener('keydown', function(e){ if(e.key==='Escape' && overlay.classList.contains('show') && !document.fullscreenElement) closeModal(); });
 
 loadMatches();

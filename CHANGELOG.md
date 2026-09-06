@@ -4,6 +4,36 @@
 
 ---
 
+## [1.6.0] - 2026-09-06
+
+Bỏ hai nút lọc trên giao diện, và thêm cơ chế app Android tự cập nhật.
+
+### Removed: nút `● Đang live` và nút `⚽ Bóng đá`
+
+Cả bản web lẫn app Android. Số trận khi tắt lọc live khớp đúng với trang nguồn, còn bộ lọc môn thì luôn bật — giữ hai cái nút chỉ để người dùng có cơ hội tự làm hỏng danh sách của mình. Nay mặc định cứng: **luôn lấy đủ trận bóng đá trong ngày**, tức `GET /?sport=football` không kèm `filter`.
+
+Phía Worker **giữ nguyên** `?filter=live` và `?sport=`: các bản APK cũ đang cài ngoài kia vẫn gửi tham số đó.
+
+Đánh đổi: không lọc nữa nên mỗi lần tải kéo toàn bộ logo qua `/proxy` (3 ảnh mỗi thẻ trận). Ngày nhiều trận thì số request tới Worker tăng theo.
+
+### Added: `GET /update` — bản kê khai phiên bản APK
+
+Đọc `update.json` trong repo này, cache 60 giây (cùng lý do với `config.json`: gọi thẳng raw.githubusercontent liên tục sẽ ăn 429).
+
+Trả `apk_url` trỏ về **chính Worker**, không bao giờ trả link GitHub. App trên TV vì thế chỉ cần biết một domain duy nhất — sau này đổi chỗ host APK chỉ phải sửa `update.json`, **không phải build lại app đã cài trên máy người dùng**.
+
+GitHub lỗi hoặc chưa có `update.json` → trả `version_code: 0` kèm HTTP 200, để app hiểu là "không có bản mới" rồi im lặng. Cập nhật là việc phụ, không được phép ném popup lỗi vào mặt người đang xem bóng.
+
+### Added: `GET /apk` — chuyển hướng tới file APK
+
+302 chứ không proxy: file ~11 MB, để GitHub trả thẳng cho TV, Worker khỏi gánh băng thông. Chỉ nhận `apk_url` dạng `https://` tuyệt đối — `update.json` là file trên mạng, ai sửa được nó cũng không biến được endpoint này thành bàn đạp redirect đi đâu tuỳ ý.
+
+### Kiểm thử
+
+Thêm 8 test cho hai endpoint mới (`test/update-endpoint.test.mjs`), gồm cả ca GitHub 429 và ca `apk_url` không phải https. `installFakeFetch` nay nhận thêm tham số `update`. **29/29 PASS.**
+
+---
+
 ## [1.5.0] - 2026-08-22
 
 Trận Man United và Việt Nam **có trong dữ liệu nhưng không nhìn thấy trên màn hình**. Không phải lỗi cào, không phải lỗi domain — lỗi ở chỗ nguồn trộn mọi môn vào một lưới.

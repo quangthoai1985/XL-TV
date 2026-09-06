@@ -1,0 +1,9 @@
+{
+  "version_code": 5,
+  "version_name": "1.4",
+  "apk_url": "https://github.com/quangthoai1985/XL-TV/releases/download/v1.4/xltv-1.4.apk",
+  "size_bytes": 11082577,
+  "mandatory": false,
+  "changelog": "- Bo nut \"Dang live\" va \"Bong da\": app luon lay du tran bong da trong ngay\n- Them tu dong kiem tra va cai ban moi",
+  "note": "Ban ke khai phien ban cho app Android tu cap nhat. Worker doc file nay o /update va /apk (cache 60s). Moi lan phat hanh: tang version_code cho khop voi versionCode trong app/build.gradle.kts, sua version_name + apk_url tro toi asset cua GitHub Release, roi commit. Dat mandatory=true neu ban cu hong han, khong cho bam \"De sau\"."
+}
