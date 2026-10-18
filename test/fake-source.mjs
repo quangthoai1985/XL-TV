@@ -118,7 +118,7 @@ export async function loadWorker() {
   const src = readFileSync(join(HERE, "..", "src", "index.js"), "utf8");
   const dir = join(HERE, ".tmp");
   mkdirSync(dir, { recursive: true });
-  const file = join(dir, `worker-${++seq}.mjs`);
+  const file = join(dir, `worker-${process.pid}-${++seq}.mjs`);
   writeFileSync(file, src);
   return (await import(`file://${file}`)).default;
 }
