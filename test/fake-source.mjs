@@ -118,7 +118,10 @@ export async function loadWorker() {
   const src = readFileSync(join(HERE, "..", "src", "index.js"), "utf8");
   const dir = join(HERE, ".tmp");
   mkdirSync(dir, { recursive: true });
-  const file = join(dir, `worker-${++seq}.mjs`);
+  // Gắn pid vào tên file: `node --test` chạy mỗi file test ở một tiến trình riêng, song
+  // song, mà `seq` thì tiến trình nào cũng đếm từ 1 → các tiến trình ghi đè worker-N.mjs
+  // của nhau đúng lúc bên kia đang import, nạp phải file rỗng ("reading 'fetch'").
+  const file = join(dir, `worker-${process.pid}-${++seq}.mjs`);
   writeFileSync(file, src);
   return (await import(`file://${file}`)).default;
 }
