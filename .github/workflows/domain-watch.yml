@@ -1,0 +1,57 @@
+# Canh domain nguồn từ ngoài Cloudflare. Xem lý do ở đầu scripts/watch-domain.mjs.
+#
+# Anchor đổi hướng sang domain mới có lưới trận → tự commit config.json lên main.
+# Worker đọc config.json (cache 60s) nên không phải deploy lại.
+# Job đỏ = không còn domain nào sống; GitHub gửi mail báo lỗi cho chủ repo.
+#
+# Lưu ý: repo public không có hoạt động 60 ngày thì GitHub tự tắt lịch chạy.
+# Khi đó vào tab Actions bấm Enable workflow.
+
+name: Canh domain nguon
+
+on:
+  # Tạm tắt lịch trong lúc chạy thử bằng tay. Ổn rồi thì bỏ comment 2 dòng dưới.
+  # schedule:
+  #   - cron: "*/10 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Chỉ dò và báo cáo, không commit"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: domain-watch
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Dò anchor
+        id: watch
+        # Ngoài main thì luôn dry-run: chạy thử trên nhánh khác không được đụng config.
+        run: node scripts/watch-domain.mjs ${{ (github.ref != 'refs/heads/main' || inputs.dry_run == true) && '--dry-run' || '' }}
+
+      - name: Commit config.json
+        if: steps.watch.outputs.changed == 'true'
+        env:
+          OLD: ${{ steps.watch.outputs.old }}
+          NEW: ${{ steps.watch.outputs.new }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add config.json
+          git commit -m "Tu doi nguon: $OLD -> $NEW (domain-watch)"
+          git pull --rebase origin main
+          git push origin HEAD:main
